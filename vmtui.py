@@ -2,30 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-vmtui.py - KVM/QEMU Driver Development Environment Manager (v2)
+vmtui.py - Curses-based KVM Manager
 
 Features:
-1. Host Environment Setup
-2. Multi-VM Management (Create, Switch, Delete)
-3. Image Selection (Ubuntu 24.04/22.04, Debian)
-4. USB Device Passthrough
-5. Console Access
-
-Author: Jules (AI Assistant)
+1. Arrow key navigation.
+2. One-key USB Attach/Detach toggle.
+3. Auto-refreshing status.
 """
 
+import curses
 import os
 import sys
 import subprocess
 import time
 import re
-import glob
 
-# --- Global State ---
-# The currently active VM name (defaults to driver-dev-vm)
-CURRENT_VM = "driver-dev-vm"
-
-# --- Configuration Helpers ---
+# --- Configuration ---
 SUDO_USER = os.environ.get('SUDO_USER')
 if SUDO_USER:
     USER_HOME = os.path.expanduser(f"~{SUDO_USER}")
@@ -35,52 +27,28 @@ else:
 HOST_SHARE_DIR = os.path.join(USER_HOME, "driver_projects")
 RAM_SIZE = 4096
 VCPUS = 4
+DISK_SIZE = "20G"
 
-# Available Images Map
+# Global State
+CURRENT_VM = "driver-dev-vm"
+
+# Images
 IMAGES = {
-    "1": {
-        "name": "Ubuntu 24.04 LTS (Noble)",
+    "Ubuntu 24.04 LTS": {
         "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
-        "filename": "ubuntu-24.04-server.img",
-        "variant": "ubuntu24.04"
+        "file": "ubuntu-24.04-server.img", "variant": "ubuntu24.04"
     },
-    "2": {
-        "name": "Ubuntu 22.04 LTS (Jammy)",
+    "Ubuntu 22.04 LTS": {
         "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
-        "filename": "ubuntu-22.04-server.img",
-        "variant": "ubuntu22.04"
+        "file": "ubuntu-22.04-server.img", "variant": "ubuntu22.04"
     },
-    "3": {
-        "name": "Debian 12 (Bookworm)",
+    "Debian 12": {
         "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2",
-        "filename": "debian-12-generic.qcow2",
-        "variant": "debian12"
+        "file": "debian-12-generic.qcow2", "variant": "debian12"
     }
 }
 
-# ANSI Colors
-C_RESET = "\033[0m"
-C_RED = "\033[91m"
-C_GREEN = "\033[92m"
-C_YELLOW = "\033[93m"
-C_BLUE = "\033[94m"
-C_CYAN = "\033[96m"
-
-def print_header():
-    os.system('clear')
-    print(f"{C_CYAN}============================================================{C_RESET}")
-    print(f"{C_CYAN}   VMTUI - Driver Dev Manager v2 {C_RESET}")
-    print(f"{C_CYAN}============================================================{C_RESET}")
-    print(f"User: {SUDO_USER if SUDO_USER else 'root'}")
-    print(f"Active VM: {C_GREEN}{CURRENT_VM}{C_RESET}")
-    print(f"Shared Dir: {HOST_SHARE_DIR}")
-    print("------------------------------------------------------------\n")
-
-def check_root():
-    if os.geteuid() != 0:
-        print(f"{C_RED}[ERROR] This script must be run as root (sudo).{C_RESET}")
-        sys.exit(1)
-
+# --- Helpers ---
 def run_cmd(cmd, shell=False, check=True):
     try:
         result = subprocess.run(
@@ -88,92 +56,61 @@ def run_cmd(cmd, shell=False, check=True):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"{C_RED}[CMD ERROR] {e}{C_RESET}")
-        print(f"{C_RED}STDERR: {e.stderr}{C_RESET}")
+    except subprocess.CalledProcessError:
         return None
 
-# --- Feature 1: Host Setup ---
-def setup_host_env():
-    print(f"{C_YELLOW}[INFO] Setting up Host Environment...{C_RESET}")
-    print("1. Updating apt cache...")
+def check_root():
+    if os.geteuid() != 0:
+        print("Error: Must run as root (sudo python3 vmtui.py)")
+        sys.exit(1)
+
+# --- Core Logic (Same as before, wrapped for TUI) ---
+def setup_host_logic(stdscr):
+    stdscr.clear()
+    stdscr.addstr(2, 2, "Installing KVM tools... Please wait.")
+    stdscr.refresh()
     run_cmd(["apt", "update"], check=False)
-    
-    print("2. Installing tools...")
     pkgs = ["qemu-kvm", "libvirt-daemon-system", "libvirt-clients", "bridge-utils", "virtinst", "cloud-image-utils", "virtiofsd"]
-    run_cmd(["apt", "install", "-y"] + pkgs)
-    
+    run_cmd(["apt", "install", "-y"] + pkgs, check=False)
     if SUDO_USER:
-        print(f"3. Configuring user '{SUDO_USER}'...")
-        run_cmd(["usermod", "-aG", "libvirt", SUDO_USER])
-        run_cmd(["usermod", "-aG", "kvm", SUDO_USER])
-        print(f"{C_RED}[IMPORTANT] Please REBOOT for permissions to take effect!{C_RESET}")
-    input("\nPress Enter to return...")
+        run_cmd(["usermod", "-aG", "libvirt", SUDO_USER], check=False)
+        run_cmd(["usermod", "-aG", "kvm", SUDO_USER], check=False)
+    
+    msg_box(stdscr, "Host Setup Complete.\nPlease REBOOT for permissions to take effect.")
 
-# --- Feature 2: VM Management ---
+def create_vm_logic(stdscr, img_name, img_data):
+    stdscr.clear()
+    h, w = stdscr.getmaxyx()
+    
+    # Check Disk
+    disk_path = f"{CURRENT_VM}.qcow2"
+    
+    # Status Update
+    def log(msg, y):
+        stdscr.addstr(y, 2, f"> {msg}")
+        stdscr.refresh()
 
-def select_image_menu():
-    print(f"{C_YELLOW}Select OS Image:{C_RESET}")
-    for key, img in IMAGES.items():
-        print(f" {key}. {img['name']}")
-    print(" C. Custom URL")
-    
-    choice = input("Choice [1]: ").strip().upper()
-    if not choice: choice = "1"
-    
-    if choice in IMAGES:
-        return IMAGES[choice]
-    elif choice == 'C':
-        url = input("Enter Image URL: ").strip()
-        name = input("Enter Local Filename (e.g. custom.img): ").strip()
-        return {"name": "Custom", "url": url, "filename": name, "variant": "generic"}
-    return IMAGES["1"]
+    log(f"Preparing {CURRENT_VM} with {img_name}...", 2)
 
-def create_vm():
-    global CURRENT_VM
-    print_header()
-    print(f"{C_YELLOW}--- Create / Reset VM ---{C_RESET}")
-    
-    # 1. Input Name
-    new_name = input(f"Enter VM Name [default: {CURRENT_VM}]: ").strip()
-    if new_name:
-        CURRENT_VM = new_name
-    
-    # 2. Select Image
-    img_config = select_image_menu()
-    
-    # 3. Confirmation
-    print(f"\n{C_RED}WARNING: This will DELETE any existing VM named '{CURRENT_VM}'!{C_RESET}")
-    if input("Continue? (y/N): ").lower() != 'y':
-        return
-
-    # --- Execution ---
-    
-    # Setup Dirs
+    # 1. Setup Dir
     if not os.path.exists(HOST_SHARE_DIR):
         os.makedirs(HOST_SHARE_DIR, exist_ok=True)
         if SUDO_USER:
             run_cmd(f"chown -R {SUDO_USER}:{SUDO_USER} {HOST_SHARE_DIR}", shell=True)
 
-    # Download Image
-    if not os.path.exists(img_config['filename']):
-        print(f"Downloading {img_config['name']}...")
-        run_cmd(["wget", "-O", img_config['filename'], img_config['url']])
-    else:
-        print(f"Using cached image: {img_config['filename']}")
-
-    # Prepare Disk
-    disk_path = f"{CURRENT_VM}.qcow2"
-    if os.path.exists(disk_path):
-        os.remove(disk_path)
+    # 2. Download
+    if not os.path.exists(img_data['file']):
+        log("Downloading Image (this may take time)...", 3)
+        run_cmd(["wget", "-O", img_data['file'], img_data['url']], check=False)
     
-    print("Creating Disk...")
-    run_cmd(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", img_config['filename'], disk_path, DISK_SIZE])
-    if SUDO_USER:
-        run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {disk_path}", shell=True)
+    # 3. Create Disk
+    log("Creating Disk...", 4)
+    if os.path.exists(disk_path): os.remove(disk_path)
+    run_cmd(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", img_data['file'], disk_path, DISK_SIZE])
+    if SUDO_USER: run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {disk_path}", shell=True)
 
-    # Cloud-Init
-    print("Generating Cloud-Init config...")
+    # 4. Cloud Init
+    log("Generating Config...", 5)
     user_data = f"""#cloud-config
 hostname: {CURRENT_VM}
 manage_etc_hosts: true
@@ -197,29 +134,25 @@ packages:
   - build-essential
   - linux-headers-generic
 """
-    # Note: linux-headers-generic might fail on non-ubuntu, but cloud-init usually ignores package errors
-    
     with open("user-data", "w") as f: f.write(user_data)
     with open("meta-data", "w") as f: f.write(f"instance-id: {CURRENT_VM}\nlocal-hostname: {CURRENT_VM}\n")
-    
     if os.path.exists("seed.iso"): os.remove("seed.iso")
     run_cmd(["cloud-localds", "seed.iso", "user-data", "meta-data"])
 
-    # Clean old
+    # 5. Clean & Install
+    log("Destroying old instance...", 6)
     run_cmd(f"virsh destroy {CURRENT_VM}", shell=True, check=False)
     run_cmd(f"virsh undefine {CURRENT_VM}", shell=True, check=False)
 
-    # Install
-    print(f"{C_GREEN}Launching VM...{C_RESET}")
+    log("Launching VM...", 7)
     install_cmd = [
         "virt-install",
-        f"--name={CURRENT_VM}",
-        f"--memory={RAM_SIZE}",
+        f"--name={CURRENT_VM}", f"--memory={RAM_SIZE}",
         "--memorybacking", "source.type=memfd,access.mode=shared",
         f"--vcpus={VCPUS}",
         f"--disk=path={disk_path},device=disk,bus=virtio",
         "--disk=path=seed.iso,device=cdrom",
-        f"--os-variant={img_config['variant']}",
+        f"--os-variant={img_data['variant']}",
         "--import", "--graphics", "none",
         "--console", "pty,target_type=serial",
         f"--filesystem", f"source={HOST_SHARE_DIR},target=host_share,driver.type=virtiofs,accessmode=passthrough",
@@ -227,113 +160,240 @@ packages:
         "--network", "network=default,model=virtio",
         "--noautoconsole"
     ]
-    run_cmd(install_cmd)
-    
-    print(f"{C_GREEN}VM '{CURRENT_VM}' created!{C_RESET}")
-    input("Press Enter to return...")
+    run_cmd(install_cmd, check=False)
+    msg_box(stdscr, f"VM {CURRENT_VM} Created Successfully!")
 
-def switch_vm():
-    global CURRENT_VM
-    print_header()
-    print(f"{C_YELLOW}--- Switch Active VM ---{C_RESET}")
-    
-    # List all running or shut off VMs from virsh
-    vms_raw = run_cmd("virsh list --all --name", shell=True, check=False)
-    if not vms_raw:
-        print("No VMs found.")
-    else:
-        vms = [v for v in vms_raw.split('\n') if v.strip()]
-        for i, vm in enumerate(vms):
-            print(f" {i+1}. {vm}")
-        
-        print("\n N. Type new name (Virtual Switch)")
-        
-        choice = input("\nSelect VM number or 'N': ").strip().upper()
-        if choice == 'N':
-            name = input("Enter VM Name: ").strip()
-            if name: CURRENT_VM = name
-        elif choice.isdigit():
-            idx = int(choice) - 1
-            if 0 <= idx < len(vms):
-                CURRENT_VM = vms[idx]
-    
-    input(f"Active VM set to '{CURRENT_VM}'. Press Enter...")
+# --- UI Components ---
 
-# --- Feature 3: USB ---
-def usb_manager():
+def draw_header(stdscr):
+    h, w = stdscr.getmaxyx()
+    # Get VM Status
+    state = run_cmd(f"virsh domstate {CURRENT_VM}", shell=True, check=False)
+    if not state: state = "Not Created"
+    
+    # Colors
+    color = curses.color_pair(2) if "running" in state else curses.color_pair(3)
+    
+    header_text = f" VMTUI | User: {SUDO_USER} | VM: {CURRENT_VM} "
+    status_text = f" Status: {state} "
+    
+    stdscr.attron(curses.color_pair(4) | curses.A_BOLD)
+    stdscr.addstr(0, 0, " " * w)
+    stdscr.addstr(0, 1, header_text)
+    stdscr.addstr(0, w - len(status_text) - 1, status_text)
+    stdscr.attroff(curses.color_pair(4) | curses.A_BOLD)
+
+def msg_box(stdscr, msg):
+    h, w = stdscr.getmaxyx()
+    lines = msg.split('\n')
+    box_h = len(lines) + 4
+    box_w = max([len(l) for l in lines]) + 6
+    start_y = h // 2 - box_h // 2
+    start_x = w // 2 - box_w // 2
+
+    win = curses.newwin(box_h, box_w, start_y, start_x)
+    win.box()
+    for i, line in enumerate(lines):
+        win.addstr(i + 2, 3, line)
+    
+    win.addstr(box_h - 1, box_w - 10, "[ OK ]", curses.A_REVERSE)
+    win.refresh()
+    win.getch()
+
+def selection_menu(stdscr, title, items):
+    """Generic vertical selection menu"""
+    curses.curs_set(0)
+    current_row = 0
+    
     while True:
-        print_header()
-        print(f"{C_YELLOW}--- USB Manager (Target: {CURRENT_VM}) ---{C_RESET}")
+        stdscr.clear()
+        draw_header(stdscr)
         
-        # List Host USBs
-        lsusb = run_cmd(["lsusb"])
+        h, w = stdscr.getmaxyx()
+        stdscr.addstr(2, 2, title, curses.A_UNDERLINE | curses.A_BOLD)
+        
+        for i, item in enumerate(items):
+            x = 4
+            y = 4 + i
+            if i == current_row:
+                stdscr.attron(curses.A_REVERSE)
+                stdscr.addstr(y, x, f" {item} ")
+                stdscr.attroff(curses.A_REVERSE)
+            else:
+                stdscr.addstr(y, x, f" {item} ")
+        
+        stdscr.addstr(h-2, 2, "Use Arrow Keys to Select, ENTER to Confirm, 'q' to Back")
+        stdscr.refresh()
+        
+        key = stdscr.getch()
+        
+        if key == curses.KEY_UP and current_row > 0:
+            current_row -= 1
+        elif key == curses.KEY_DOWN and current_row < len(items) - 1:
+            current_row += 1
+        elif key == ord('\n'):
+            return current_row
+        elif key == ord('q') or key == 27: # Esc
+            return -1
+
+def usb_menu_logic(stdscr):
+    """Specific logic for USB Attach/Detach"""
+    # Move current_row outside so it remembers position after refresh
+    current_row = 0 
+    
+    while True:
+        # 1. Scan Devices
         devices = []
+        lsusb = run_cmd(["lsusb"])
         if lsusb:
             for line in lsusb.split('\n'):
                 m = re.search(r"Bus (\d+) Device (\d+): ID ([0-9a-fA-F]+):([0-9a-fA-F]+) (.+)", line)
                 if m:
                     devices.append({'vid': m.group(3), 'pid': m.group(4), 'name': m.group(5)})
-
-        # Check Attached
+        
+        # 2. Check Attached
         xml = run_cmd(["virsh", "dumpxml", CURRENT_VM], check=False)
-        attached_list = []
+        attached_sigs = []
         if xml:
             for d in devices:
                 if f"id='0x{d['vid']}'" in xml and f"id='0x{d['pid']}'" in xml:
-                    attached_list.append(f"{d['vid']}:{d['pid']}")
+                    attached_sigs.append(f"{d['vid']}:{d['pid']}")
 
-        for i, d in enumerate(devices):
-            status = f"{C_GREEN}[ATTACHED]{C_RESET}" if f"{d['vid']}:{d['pid']}" in attached_list else f"{C_BLUE}[FREE]{C_RESET}"
-            print(f" {i+1}. {status} {d['vid']}:{d['pid']} - {d['name']}")
+        # 3. Build Menu Items
+        menu_items = []
+        for d in devices:
+            sig = f"{d['vid']}:{d['pid']}"
+            is_attached = sig in attached_sigs
+            status = "[ ATTACHED ]" if is_attached else "[   FREE   ]"
+            # Store tuple: (Display String, DataObject, IsAttached)
+            display = f"{status} {sig} - {d['name'][:40]}"
+            menu_items.append((display, d, is_attached))
 
-        print("\n A. Attach / D. Detach / B. Back")
-        choice = input("Option: ").strip().upper()
+        # Safety check: if devices list shrank, keep row within bounds
+        if current_row >= len(menu_items):
+            current_row = max(0, len(menu_items) - 1)
+
+        # 4. Render Loop
+        curses.curs_set(0)
         
-        if choice == 'B': break
-        if choice in ['A', 'D']:
-            try:
-                idx = int(input("Device #: ")) - 1
-                dev = devices[idx]
-                xml_str = f"<hostdev mode='subsystem' type='usb' managed='yes'><source><vendor id='0x{dev['vid']}'/><product id='0x{dev['pid']}'/></source></hostdev>"
-                with open("/tmp/usb.xml", "w") as f: f.write(xml_str)
+        while True: # Inner loop for navigation without rescan
+            stdscr.clear()
+            draw_header(stdscr)
+            stdscr.addstr(2, 2, "USB Device Manager", curses.A_BOLD | curses.A_UNDERLINE)
+            
+            for i, item in enumerate(menu_items):
+                display_str, _, is_attached = item
+                y = 4 + i
                 
-                action = "attach-device" if choice == 'A' else "detach-device"
-                run_cmd(["virsh", action, CURRENT_VM, "/tmp/usb.xml", "--live"], check=False)
-                time.sleep(1)
-            except: pass
+                # Base Color
+                attr = curses.color_pair(2) if is_attached else curses.color_pair(1)
+                
+                # Highlight Logic (Fixed)
+                if i == current_row:
+                    attr |= curses.A_REVERSE  # Merge highlight with color
+                
+                stdscr.addstr(y, 4, display_str, attr)
 
-# --- Main ---
-def main_menu():
+            stdscr.addstr(stdscr.getmaxyx()[0]-2, 2, "ENTER to Toggle State (Attach/Detach), 'q' to Back")
+            stdscr.refresh()
+
+            key = stdscr.getch()
+
+            if key == curses.KEY_UP and current_row > 0:
+                current_row -= 1
+            elif key == curses.KEY_DOWN and current_row < len(menu_items) - 1:
+                current_row += 1
+            elif key == ord('q') or key == 27:
+                return # Go back to main menu
+            elif key == ord('\n'):
+                # EXECUTE ACTION
+                if not menu_items: break
+
+                sel_display, sel_dev, sel_attached = menu_items[current_row]
+                
+                action_name = "Detaching" if sel_attached else "Attaching"
+                
+                # Show loading
+                stdscr.addstr(stdscr.getmaxyx()[0]-3, 2, f"{action_name} USB device... Please wait...", curses.color_pair(3))
+                stdscr.refresh()
+                
+                # Prepare XML
+                xml_content = f"<hostdev mode='subsystem' type='usb' managed='yes'><source><vendor id='0x{sel_dev['vid']}'/><product id='0x{sel_dev['pid']}'/></source></hostdev>"
+                xml_path = "/tmp/vmtui_usb.xml"
+                with open(xml_path, "w") as f: f.write(xml_content)
+                
+                cmd_action = "detach-device" if sel_attached else "attach-device"
+                run_cmd(["virsh", cmd_action, CURRENT_VM, xml_path, "--live"], check=False)
+                
+                time.sleep(1) # Wait for libvirt
+                break # Break inner loop to trigger Re-scan (Outer loop)
+def input_box(stdscr, prompt):
+    curses.echo()
+    stdscr.addstr(stdscr.getmaxyx()[0]-3, 2, prompt)
+    stdscr.refresh()
+    inp = stdscr.getstr(stdscr.getmaxyx()[0]-3, len(prompt)+3, 20)
+    curses.noecho()
+    return inp.decode('utf-8')
+
+# --- Main App Loop ---
+def main(stdscr):
+    # Setup Colors
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_WHITE, -1)
+    curses.init_pair(2, curses.COLOR_GREEN, -1) # Running / Attached
+    curses.init_pair(3, curses.COLOR_RED, -1)   # Stopped
+    curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_CYAN) # Header
+
     global CURRENT_VM
+
+    menu_options = [
+        "1. Setup Host Environment",
+        "2. Create / Reset VM",
+        "3. USB Manager (Attach/Detach)",
+        "4. Console (Access VM)",
+        "5. Start VM",
+        "6. Force Stop VM",
+        "7. Switch Active VM",
+        "8. Quit"
+    ]
+
     while True:
-        print_header()
+        idx = selection_menu(stdscr, "Main Menu", menu_options)
         
-        # Check Status
-        state = run_cmd(f"virsh domstate {CURRENT_VM}", shell=True, check=False)
-        st_col = C_GREEN if state and "running" in state else C_RED
-        print(f"Status: {st_col}{state if state else 'Not Found'}{C_RESET}")
+        if idx == 0: # Setup
+            setup_host_logic(stdscr)
         
-        print("\n1. Setup Host Environment")
-        print("2. Create / Reset VM (Select Image & Name)")
-        print("3. USB Manager")
-        print("4. Console")
-        print("5. Start VM")
-        print("6. Stop VM (Force)")
-        print("S. Switch Active VM")
-        print("Q. Quit")
+        elif idx == 1: # Create
+            img_names = list(IMAGES.keys())
+            img_idx = selection_menu(stdscr, "Select OS Image", img_names)
+            if img_idx != -1:
+                sel_img = img_names[img_idx]
+                create_vm_logic(stdscr, sel_img, IMAGES[sel_img])
         
-        c = input("\nOption: ").strip().upper()
+        elif idx == 2: # USB
+            usb_menu_logic(stdscr)
         
-        if c == '1': setup_host_env()
-        elif c == '2': create_vm()
-        elif c == '3': usb_manager()
-        elif c == '4': os.system(f"virsh console {CURRENT_VM}")
-        elif c == '5': run_cmd(f"virsh start {CURRENT_VM}", shell=True, check=False); time.sleep(1)
-        elif c == '6': run_cmd(f"virsh destroy {CURRENT_VM}", shell=True, check=False); time.sleep(1)
-        elif c == 'S': switch_vm()
-        elif c == 'Q': sys.exit(0)
+        elif idx == 3: # Console
+            curses.endwin()
+            os.system(f"virsh console {CURRENT_VM}")
+            # Curses will auto-restore on loop wrap, but we need to wait
+        
+        elif idx == 4: # Start
+            run_cmd(["virsh", "start", CURRENT_VM], check=False)
+            time.sleep(1)
+            
+        elif idx == 5: # Stop
+            run_cmd(["virsh", "destroy", CURRENT_VM], check=False)
+            time.sleep(1)
+            
+        elif idx == 6: # Switch
+            new_vm = input_box(stdscr, "Enter VM Name: ")
+            if new_vm: CURRENT_VM = new_vm
+            
+        elif idx == 7 or idx == -1: # Quit
+            break
 
 if __name__ == "__main__":
     check_root()
-    try: main_menu()
-    except KeyboardInterrupt: sys.exit(0)
+    curses.wrapper(main)
