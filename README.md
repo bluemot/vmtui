@@ -110,3 +110,23 @@ VM 端：預設掛載於 /mnt/host_share。
 
 Q: USB 掛載失敗？  
 A: 請確認 VM 處於 Running 狀態。部分 USB 3.0 裝置可能需要特定的 Controller 驅動，但在大多數 Linux 開發情境下可直接運作。
+
+Q:如何透過ssh -l $vm_user $vm_host_name 就連進vm？  
+A: 在host機器安裝 libnss-libvirt 套件
+```bash
+sudo apt update
+sudo apt install libnss-libvirt
+```
+啟用模組： 編輯 /etc/nsswitch.conf：
+```bash
+sudo nano /etc/nsswitch.conf
+````
+找到 hosts: 開頭的那一行，在 files 和 dns 之間（或者最後面）加上 libvirt。  
+修改前：
+```text
+hosts:          files [...] dns
+````
+修改後：
+```text
+hosts:          files [...] libvirt dns
+````
