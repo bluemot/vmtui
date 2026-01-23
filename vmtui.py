@@ -26,6 +26,8 @@ import time
 import re
 import urllib.request
 import urllib.error
+import pwd
+import grp
 
 # --- Configuration ---
 
@@ -283,7 +285,8 @@ chpasswd:
     ubuntu:password
   expire: False
 runcmd:
-  - sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=".*"/GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyS0 console=ttyS1 net.ifnames=0 biosdevname=0"/' /etc/default/grub
+  - rm -f /etc/default/grub.d/50-cloudimg-settings.cfg
+  - sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=".*"/GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyS1 console=ttyS0 net.ifnames=0 biosdevname=0"/' /etc/default/grub
   - update-grub
   
   # Create mount point in Guest's home directory
@@ -357,10 +360,17 @@ packages:
     success = run_cmd_live(stdscr, install_cmd, title="Installing VM (Please Watch for Errors)")
     
     if success:
-        msg_box(stdscr, f"VM {CURRENT_VM} Created Successfully!\nLog: {log_path}\nWait 30s for boot, then connect.")
-    else:
-        # If failed, pause so user can read the error in the scrolling window
-        msg_box(stdscr, "Error: VM Installation Failed!\nPlease check the error message above.")
+        if os.path.exists(log_path):
+            try:
+                qemu_uid = pwd.getpwnam('libvirt-qemu').pw_uid
+                kvm_gid = grp.getgrnam('kvm').gr_gid
+                os.chown(log_path, qemu_uid, kvm_gid)
+                os.chmod(log_path, 0o640)
+            except KeyError:
+                pass
+            except Exception as e:
+                pass
+        # --------------------------------
 
 # --- UI Components ---
 
