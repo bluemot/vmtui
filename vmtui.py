@@ -2,18 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-vmtui.py - KVM Manager (Final Version)
+vmtui.py - KVM Manager (Directory Isolation Edition)
 
-Features:
-1. TUI Interface (Curses) with Auto-Refresh.
-2. SSH Password Login Enabled (via cloud-init).
-3. Shared Folder: Host HOME (~/) -> Guest /home/ubuntu/host_share.
-4. Pre-installed Packages: bear, net-tools, libnss-libvirt.
-5. Console Logging to File (ttyS1) for debugging crashes.
-6. Suspend (RAM) & Hibernate (Disk) Support.
-7. USB Hotplug Manager.
-8. Native Progress Bar for Downloads (urllib).
-9. Real-time Output Window for long-running commands (apt).
+Updates:
+1. VM Isolation: All files are stored in 'vms/{VM_NAME}/'.
+2. Switch VM: Auto-scan 'vms/' directory and show selection menu.
+3. Safety: Warning prompt before overwriting existing VMs.
+4. Auto-Reboot: VM reboots automatically after install to apply GRUB settings.
+5. Log Permissions: Auto-fix ownership to libvirt-qemu:kvm.
 
 Author: Jules (AI Assistant)
 """
@@ -28,6 +24,7 @@ import urllib.request
 import urllib.error
 import pwd
 import grp
+import shutil
 
 # --- Configuration ---
 
@@ -37,6 +34,10 @@ if SUDO_USER:
     USER_HOME = os.path.expanduser(f"~{SUDO_USER}")
 else:
     USER_HOME = os.path.expanduser("~")
+
+# Base directory for all VM data (relative to this script)
+# Structure: ./vms/{vm_name}/{vm_name}.qcow2
+VM_BASE_DIR = os.path.abspath("vms")
 
 HOST_SHARE_DIR = os.path.join(USER_HOME, "driver_projects")
 RAM_SIZE = 4096
@@ -64,16 +65,14 @@ IMAGES = {
 
 # --- Helpers ---
 
+def get_vm_dir(vm_name):
+    """Returns the absolute path to the specific VM's directory."""
+    return os.path.join(VM_BASE_DIR, vm_name)
+
 def run_cmd(cmd, shell=False, check=True):
-    """
-    Executes a shell command in the background and returns stdout.
-    Used for quick/silent commands (e.g., virsh domstate).
-    """
     try:
-        # shell=True requires cmd to be a string
         if shell and isinstance(cmd, list):
             cmd = " ".join(cmd)
-            
         result = subprocess.run(
             cmd, shell=shell, check=check, 
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
@@ -83,49 +82,31 @@ def run_cmd(cmd, shell=False, check=True):
         return None
 
 def run_cmd_live(stdscr, cmd, title="Executing..."):
-    """
-    Executes a command and streams its output to a scrolling Curses window.
-    Used for long-running tasks like 'apt install' so the user sees progress.
-    """
     h, w = stdscr.getmaxyx()
-    
-    # Create a window for output
     win = curses.newwin(h - 4, w - 4, 2, 2)
-    win.scrollok(True) # Enable scrolling
+    win.scrollok(True)
     win.idlok(True)
     
-    # Draw simple border/title
     stdscr.clear()
     draw_header(stdscr)
     stdscr.addstr(2, 2, f" {title} ", curses.A_BOLD | curses.A_REVERSE)
     stdscr.refresh()
     
     try:
-        # Use Popen to capture stdout in real-time
         process = subprocess.Popen(
-            cmd, 
-            shell=False, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.STDOUT, # Merge stderr into stdout
-            text=True, 
-            bufsize=1
+            cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
         )
-        
         while True:
-            # Read line by line
             line = process.stdout.readline()
             if not line and process.poll() is not None:
                 break
-            
             if line:
                 try:
                     win.addstr(line)
                     win.refresh()
                 except curses.error:
-                    pass # Ignore errors if line is too long or window is full
-                    
+                    pass
         return process.poll() == 0
-
     except Exception as e:
         win.addstr(f"\n[Error] Failed to execute: {e}")
         win.refresh()
@@ -133,19 +114,12 @@ def run_cmd_live(stdscr, cmd, title="Executing..."):
         return False
 
 def download_with_progress(stdscr, url, filename):
-    """
-    Downloads a file using urllib with a visual progress bar in Curses.
-    Replaces 'wget' to avoid terminal buffer issues.
-    """
     try:
         h, w = stdscr.getmaxyx()
-        
-        # UI Setup for Progress Box
         box_w = min(60, w - 4)
         box_x = (w - box_w) // 2
         box_y = h // 2 - 2
         
-        # Open connection
         with urllib.request.urlopen(url) as response:
             total_size = int(response.info().get('Content-Length', 0))
             block_size = 8192
@@ -154,122 +128,136 @@ def download_with_progress(stdscr, url, filename):
             with open(filename, 'wb') as f:
                 while True:
                     buffer = response.read(block_size)
-                    if not buffer:
-                        break
-                    
+                    if not buffer: break
                     downloaded += len(buffer)
                     f.write(buffer)
                     
-                    # --- Draw Progress Bar ---
                     if total_size > 0:
                         percent = downloaded / total_size
-                        bar_len = box_w - 12 # Reserve space for text
+                        bar_len = box_w - 12
                         filled_len = int(bar_len * percent)
                         bar = "=" * filled_len + "-" * (bar_len - filled_len)
                         
-                        # Draw Title
                         stdscr.attron(curses.color_pair(4) | curses.A_BOLD)
-                        stdscr.addstr(box_y, box_x, f" Downloading Image... {url} ")
+                        stdscr.addstr(box_y, box_x, f" Downloading Image... ")
                         stdscr.attroff(curses.color_pair(4) | curses.A_BOLD)
                         
-                        # Draw Bar: [====----] 45%
                         stdscr.move(box_y + 2, 0)
                         stdscr.clrtoeol()
-                        
                         bar_str = f"[{bar}] {int(percent * 100)}%"
                         str_x = (w - len(bar_str)) // 2
-                        
                         stdscr.addstr(box_y + 2, str_x, bar_str, curses.color_pair(2))
                         stdscr.refresh()
-            
         return True
-
     except Exception as e:
         msg_box(stdscr, f"Download Error:\n{str(e)}")
         return False
 
 def check_root():
     if os.geteuid() != 0:
-        print("Error: Must run as root (sudo python3 vmtui.py)")
-        sys.exit(1)
+        print("需要 Root 權限，正在嘗試提權 (Requesting sudo)...")
+        # 使用 sudo 重啟目前的 script
+        # sys.executable 是 python 解譯器的路徑 (e.g., /usr/bin/python3)
+        # sys.argv 是目前的參數 (e.g., ['./vmtui.py'])
+        args = ["sudo", sys.executable] + sys.argv
+
+        # os.execvp 會用新程序直接「取代」目前程序，不會產生 subprocess
+        os.execvp("sudo", args)
 
 # --- Logic Functions ---
 
 def setup_host_logic(stdscr):
-    """
-    Installs KVM, Libvirt, and necessary tools on the Host machine.
-    Uses 'run_cmd_live' so user can see apt-get output.
-    """
     run_cmd_live(stdscr, ["apt", "update"], title="apt update...")
-    
-    pkgs = [
-        "qemu-kvm", 
-        "libvirt-daemon-system", 
-        "libvirt-clients", 
-        "bridge-utils", 
-        "virtinst", 
-        "cloud-image-utils", 
-        "virtiofsd",
-        "libnss-libvirt" # For hostname resolution
-    ]
-    
-    # Use Live Output window for installation
+    pkgs = ["qemu-kvm", "libvirt-daemon-system", "libvirt-clients", "bridge-utils", "virtinst", "cloud-image-utils", "virtiofsd", "libnss-libvirt"]
     success = run_cmd_live(stdscr, ["apt", "install", "-y"] + pkgs, title="Installing Packages...")
     
     if success:
         if SUDO_USER:
             run_cmd(["usermod", "-aG", "libvirt", SUDO_USER], check=False)
             run_cmd(["usermod", "-aG", "kvm", SUDO_USER], check=False)
-        msg_box(stdscr, "Host Setup Complete.\nNote: Check /etc/nsswitch.conf for 'libvirt'.\nPlease REBOOT for permissions to take effect.")
+        msg_box(stdscr, "Host Setup Complete.\nPlease REBOOT for permissions to take effect.")
     else:
-        msg_box(stdscr, "Host Setup Failed. Check internet connection.")
+        msg_box(stdscr, "Host Setup Failed.")
 
 def create_vm_logic(stdscr, img_name, img_data):
     """
-    Provisioning logic: Download image, Create Disk, Gen Cloud-init, Install VM.
+    Creates a new VM in its own directory: vms/{CURRENT_VM}/
     """
-    stdscr.clear()
-    h, w = stdscr.getmaxyx()
-    disk_path = f"{CURRENT_VM}.qcow2"
+    global CURRENT_VM
     
+    # 1. Ask for VM Name (Default to CURRENT_VM)
+    new_name = input_box(stdscr, f"VM Name [{CURRENT_VM}]: ")
+    if new_name:
+        CURRENT_VM = new_name
+    
+    # 2. Prepare Directory & Check Overwrite
+    vm_dir = get_vm_dir(CURRENT_VM)
+    
+    if os.path.exists(vm_dir):
+        # Warning!
+        choice = selection_menu(stdscr, f"WARNING: VM '{CURRENT_VM}' exists!", ["Cancel", "Overwrite (Destroy & Delete Data)"])
+        if choice == 0 or choice == -1:
+            return # Cancel
+        
+        # Destroy and cleanup
+        run_cmd(f"virsh destroy {CURRENT_VM}", shell=True, check=False)
+        run_cmd(f"virsh undefine {CURRENT_VM}", shell=True, check=False)
+        try:
+            shutil.rmtree(vm_dir)
+        except Exception as e:
+            msg_box(stdscr, f"Error removing directory: {e}")
+            return
+
+    os.makedirs(vm_dir, exist_ok=True)
+    if SUDO_USER:
+        run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {vm_dir}", shell=True)
+
+    # Define paths inside the VM dir
+    disk_path = os.path.join(vm_dir, f"{CURRENT_VM}.qcow2")
+    user_data_path = os.path.join(vm_dir, "user-data")
+    meta_data_path = os.path.join(vm_dir, "meta-data")
+    seed_iso_path = os.path.join(vm_dir, "seed.iso")
+    log_path = os.path.join(vm_dir, f"{CURRENT_VM}-console.log")
+    
+    # Base image path (cache in VM_BASE_DIR or current dir to avoid redownloading for every VM?)
+    # Let's keep base images in VM_BASE_DIR root to share them.
+    base_img_path = os.path.join(VM_BASE_DIR, img_data['file'])
+
     def log(msg, y):
         stdscr.move(y, 0)
         stdscr.clrtoeol()
         stdscr.addstr(y, 2, f"> {msg}")
         stdscr.refresh()
 
-    log(f"Preparing {CURRENT_VM} with {img_name}...", 2)
+    stdscr.clear()
+    draw_header(stdscr)
+    log(f"Setting up {CURRENT_VM} in {vm_dir}...", 2)
 
-    # 1. Setup Shared Directory (Host Side)
+    # 3. Setup Shared Dir
     if not os.path.exists(HOST_SHARE_DIR):
         os.makedirs(HOST_SHARE_DIR, exist_ok=True)
         if SUDO_USER:
             run_cmd(f"chown -R {SUDO_USER}:{SUDO_USER} {HOST_SHARE_DIR}", shell=True)
 
-    # 2. Download Image (Using Native Curses Progress Bar)
-    if not os.path.exists(img_data['file']):
-        # Clear screen for the progress bar
+    # 4. Download Image (Shared Cache)
+    if not os.path.exists(VM_BASE_DIR): os.makedirs(VM_BASE_DIR, exist_ok=True)
+    
+    if not os.path.exists(base_img_path):
         stdscr.clear()
-        success = download_with_progress(stdscr, img_data['url'], img_data['file'])
-        
-        # Redraw background after download
+        success = download_with_progress(stdscr, img_data['url'], base_img_path)
         stdscr.clear()
         draw_header(stdscr)
-        log(f"Preparing {CURRENT_VM} with {img_name}...", 2)
-        
-        if not success:
-            return # Abort if download failed
+        log(f"Setting up {CURRENT_VM}...", 2)
+        if not success: return
 
-    # 3. Create Disk
+    # 5. Create Disk
     log("Creating Disk (QCOW2)...", 4)
-    if os.path.exists(disk_path): os.remove(disk_path)
-    run_cmd(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", img_data['file'], disk_path, DISK_SIZE])
+    run_cmd(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", base_img_path, disk_path, DISK_SIZE])
     if SUDO_USER: run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {disk_path}", shell=True)
 
-    # 4. Generate Cloud-Init Config
+    # 6. Generate Cloud-Init
     log("Generating Cloud-Init Configuration...", 5)
     
-    # Cloud-init: SSH Fix + Multi-Console + Mount Point + Packages
     user_data = f"""#cloud-config
 hostname: {CURRENT_VM}
 manage_etc_hosts: true
@@ -289,10 +277,8 @@ runcmd:
   - sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=".*"/GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyS1 console=ttyS0 net.ifnames=0 biosdevname=0"/' /etc/default/grub
   - update-grub
   
-  # Create mount point in Guest's home directory
   - mkdir -p /home/ubuntu/host_share
   - chown ubuntu:ubuntu /home/ubuntu/host_share
-  # Auto-mount Host directory via virtiofs
   - echo "host_share /home/ubuntu/host_share virtiofs defaults 0 0" >> /etc/fstab
   - mount -a
 
@@ -316,22 +302,20 @@ packages:
   - pkgconf
   - bridge-utils
   - curl
+
+# Auto-Reboot to apply GRUB settings
+power_state:
+  mode: reboot
+  message: "Setup complete, rebooting..."
+  condition: True
 """
-    with open("user-data", "w") as f: f.write(user_data)
-    with open("meta-data", "w") as f: f.write(f"instance-id: {CURRENT_VM}\nlocal-hostname: {CURRENT_VM}\n")
-    if os.path.exists("seed.iso"): os.remove("seed.iso")
-    run_cmd(["cloud-localds", "seed.iso", "user-data", "meta-data"])
+    with open(user_data_path, "w") as f: f.write(user_data)
+    with open(meta_data_path, "w") as f: f.write(f"instance-id: {CURRENT_VM}\nlocal-hostname: {CURRENT_VM}\n")
+    if os.path.exists(seed_iso_path): os.remove(seed_iso_path)
+    run_cmd(["cloud-localds", seed_iso_path, user_data_path, meta_data_path])
 
-    # 5. Clean Old Instance
-    log("Destroying old instance...", 6)
-    run_cmd(f"virsh destroy {CURRENT_VM}", shell=True, check=False)
-    run_cmd(f"virsh undefine {CURRENT_VM}", shell=True, check=False)
-
-    # 6. Install VM
+    # 7. Install VM
     log("Launching VM via virt-install...", 7)
-    
-    # Log path set to /var/log/libvirt/qemu to comply with AppArmor
-    log_path = f"/var/log/libvirt/qemu/{CURRENT_VM}-console.log"
     
     install_cmd = [
         "virt-install",
@@ -339,63 +323,77 @@ packages:
         "--memorybacking", "source.type=memfd,access.mode=shared",
         f"--vcpus={VCPUS}",
         f"--disk=path={disk_path},device=disk,bus=virtio",
-        "--disk=path=seed.iso,device=cdrom",
+        "--disk=path={seed_iso_path},device=cdrom".format(seed_iso_path=seed_iso_path),
         f"--os-variant={img_data['variant']}",
         "--import", "--graphics", "none",
-        
-        # --- 修改重點開始 ---
-        # 1. 第一個 Serial (serial0): 指定為 PTY (這就是給 virsh console 用的)
         "--serial", "pty", 
-        # 2. 第二個 Serial (serial1): 指定為 File (這是給 Log 用的)
         "--serial", f"file,path={log_path}",
-        # 3. 指定 Console 連接到第一個 Serial
         "--console", "pty,target_type=serial",
-        # --- 修改重點結束 ---
-        
         f"--filesystem", f"source={HOST_SHARE_DIR},target=host_share,driver.type=virtiofs,accessmode=passthrough",
         "--cpu", "host-passthrough",
         "--network", "network=default,model=virtio",
         "--noautoconsole"
     ]
-    success = run_cmd_live(stdscr, install_cmd, title="Installing VM (Please Watch for Errors)")
+    
+    success = run_cmd_live(stdscr, install_cmd, title="Installing VM")
     
     if success:
+        # Fix Permissions for Log file
         if os.path.exists(log_path):
             try:
                 qemu_uid = pwd.getpwnam('libvirt-qemu').pw_uid
                 kvm_gid = grp.getgrnam('kvm').gr_gid
                 os.chown(log_path, qemu_uid, kvm_gid)
                 os.chmod(log_path, 0o640)
-            except KeyError:
-                pass
-            except Exception as e:
-                pass
-        # --------------------------------
+            except: pass
+            
+        # Also fix ownership of the VM directory itself for the user
+        if SUDO_USER:
+             run_cmd(f"chown -R {SUDO_USER}:{SUDO_USER} {vm_dir}", shell=True)
+
+        msg_box(stdscr, f"VM {CURRENT_VM} Created!\nFiles in: {vm_dir}\n\nNote: VM will auto-reboot now.\nWait 30s before connecting.")
+    else:
+        msg_box(stdscr, "Error: VM Installation Failed.")
+
+def switch_vm_menu(stdscr):
+    """Scans vms/ directory and lets user choose."""
+    global CURRENT_VM
+    
+    if not os.path.exists(VM_BASE_DIR):
+        os.makedirs(VM_BASE_DIR, exist_ok=True)
+        
+    # List subdirectories
+    vms = [d for d in os.listdir(VM_BASE_DIR) if os.path.isdir(os.path.join(VM_BASE_DIR, d))]
+    vms.sort()
+    
+    if not vms:
+        msg_box(stdscr, "No VMs found in 'vms/' directory.")
+        return
+
+    # Add 'Cancel' option
+    menu_items = vms + ["[ Cancel ]"]
+    
+    idx = selection_menu(stdscr, "Select Active VM", menu_items)
+    if idx != -1 and idx < len(vms):
+        CURRENT_VM = vms[idx]
+        msg_box(stdscr, f"Switched to: {CURRENT_VM}")
 
 # --- UI Components ---
 
 def draw_header(stdscr):
     h, w = stdscr.getmaxyx()
-    
-    # 1. Background Bar
-    # Use color pair 4 (Header) to fill the line
     stdscr.attron(curses.color_pair(4) | curses.A_BOLD)
     stdscr.move(0, 0)
     stdscr.clrtoeol()
     stdscr.addstr(0, 0, " " * (w - 1)) 
     
-    # 2. Left Text
     header_text = f" VMTUI | VM: {CURRENT_VM} "
     stdscr.addstr(0, 0, header_text)
 
-    # 3. Right Status (The logic that was broken)
-    # Get Status
     state = run_cmd(f"virsh domstate {CURRENT_VM}", shell=True, check=False)
     if not state: state = "Not Found"
-    
     status_text = f" Status: [{state.upper()}] "
     
-    # Calculate position: width - length - 2 (Safe margin)
     pos_x = w - len(status_text) - 2
     if pos_x > len(header_text):
         stdscr.addstr(0, pos_x, status_text)
@@ -403,7 +401,6 @@ def draw_header(stdscr):
     stdscr.attroff(curses.color_pair(4) | curses.A_BOLD)
 
 def msg_box(stdscr, msg):
-    """Displays a simple message box and waits for a key press."""
     h, w = stdscr.getmaxyx()
     lines = msg.split('\n')
     box_h = len(lines) + 4
@@ -415,16 +412,14 @@ def msg_box(stdscr, msg):
     win.box()
     for i, line in enumerate(lines):
         win.addstr(i + 2, 3, line)
-    
     win.addstr(box_h - 1, box_w - 10, "[ OK ]", curses.A_REVERSE)
     win.refresh()
     win.getch()
 
 def selection_menu(stdscr, title, items):
-    """Generic vertical menu with 1-second auto-refresh for status updates."""
     curses.curs_set(0)
     current_row = 0
-    stdscr.timeout(1000) # Refresh every 1000ms
+    stdscr.timeout(1000) 
     
     while True:
         stdscr.clear()
@@ -442,11 +437,10 @@ def selection_menu(stdscr, title, items):
             else:
                 stdscr.addstr(y, x, f" {item} ")
         
-        stdscr.addstr(h-2, 2, "Use Arrow Keys to Select, ENTER to Confirm, 'q' to Back")
+        stdscr.addstr(h-2, 2, "Use Arrow Keys, ENTER to Confirm, 'q' to Back")
         stdscr.refresh()
         
         key = stdscr.getch()
-        
         if key == curses.KEY_UP and current_row > 0: current_row -= 1
         elif key == curses.KEY_DOWN and current_row < len(items) - 1: current_row += 1
         elif key == ord('\n'): return current_row
@@ -454,12 +448,10 @@ def selection_menu(stdscr, title, items):
         elif key == -1: continue
 
 def usb_menu_logic(stdscr):
-    """USB Manager with Auto-Refresh logic."""
     current_row = 0
-    stdscr.timeout(2000) # Refresh device list every 2s
+    stdscr.timeout(2000)
     
     while True:
-        # 1. Scan (Inside loop for auto-refresh)
         devices = []
         lsusb = run_cmd(["lsusb"])
         if lsusb:
@@ -487,13 +479,11 @@ def usb_menu_logic(stdscr):
 
         stdscr.clear()
         draw_header(stdscr)
-        stdscr.addstr(2, 2, "USB Device Manager (Auto-Refresh)", curses.A_BOLD | curses.A_UNDERLINE)
+        stdscr.addstr(2, 2, "USB Device Manager", curses.A_BOLD | curses.A_UNDERLINE)
         
         for i, item in enumerate(menu_items):
             display_str, _, is_attached = item
             y = 4 + i
-            
-            # Base Color
             attr = curses.color_pair(2) if is_attached else curses.color_pair(1)
             if i == current_row: attr |= curses.A_REVERSE
             stdscr.addstr(y, 4, display_str, attr)
@@ -511,14 +501,12 @@ def usb_menu_logic(stdscr):
 
             action = "detach-device" if sel_attached else "attach-device"
             msg = "Detaching..." if sel_attached else "Attaching..."
-            
             stdscr.addstr(stdscr.getmaxyx()[0]-3, 2, msg, curses.color_pair(3))
             stdscr.refresh()
             
             xml_content = f"<hostdev mode='subsystem' type='usb' managed='yes'><source><vendor id='0x{sel_dev['vid']}'/><product id='0x{sel_dev['pid']}'/></source></hostdev>"
-            xml_path = "/tmp/vmtui_usb.xml"
+            xml_path = os.path.join("/tmp", f"usb_{sel_dev['vid']}.xml")
             with open(xml_path, "w") as f: f.write(xml_content)
-            
             run_cmd(["virsh", action, CURRENT_VM, xml_path, "--live"], check=False)
             time.sleep(0.5)
 
@@ -526,7 +514,6 @@ def input_box(stdscr, prompt):
     curses.echo()
     stdscr.addstr(stdscr.getmaxyx()[0]-3, 2, prompt)
     stdscr.refresh()
-    # Turn off timeout for input
     stdscr.timeout(-1)
     inp = stdscr.getstr(stdscr.getmaxyx()[0]-3, len(prompt)+3, 20)
     curses.noecho()
@@ -534,7 +521,6 @@ def input_box(stdscr, prompt):
 
 # --- Main ---
 def main(stdscr):
-    # Colors: 1=White, 2=Green, 3=Red, 4=WhiteOnBlue(Header)
     curses.start_color()
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_WHITE, -1)
@@ -549,18 +535,18 @@ def main(stdscr):
         "2. Create / Reset VM",
         "3. USB Manager",
         "4. Console (Access VM)",
-        "5. Start / Restore (from Disk)",  # Maps to virsh start
-        "6. Hibernate (Save to Disk)",     # Maps to virsh managedsave
-        "7. Pause (Freeze in RAM)",        # Maps to virsh suspend
-        "8. Resume (Unfreeze RAM)",        # Maps to virsh resume
+        "5. Start / Restore",
+        "6. Hibernate (Save to Disk)",
+        "7. Pause (Freeze in RAM)",
+        "8. Resume (Unfreeze RAM)",
         "9. Force Stop VM",
-        "A. Switch Active VM",
+        "A. Switch Active VM (Select from List)",
         "Q. Quit"
     ]
 
     while True:
         idx = selection_menu(stdscr, "Main Menu", menu_options)
-        stdscr.timeout(-1) # Reset to blocking mode for actions
+        stdscr.timeout(-1)
 
         if idx == 0: setup_host_logic(stdscr)
         elif idx == 1:
@@ -573,31 +559,15 @@ def main(stdscr):
         elif idx == 3:
             curses.endwin()
             os.system(f"virsh console {CURRENT_VM}")
-            
-        elif idx == 4: # Start / Restore
-            run_cmd(["virsh", "start", CURRENT_VM], check=False)
-            
-        elif idx == 5: # Hibernate
-            msg_box(stdscr, "Hibernating to disk (managedsave)...\nHost can be rebooted safely.")
+        elif idx == 4: run_cmd(["virsh", "start", CURRENT_VM], check=False)
+        elif idx == 5:
+            msg_box(stdscr, "Hibernating...")
             run_cmd(["virsh", "managedsave", CURRENT_VM], check=False)
-            
-        elif idx == 6: # Pause (RAM)
-            # This is the real virsh suspend
-            run_cmd(["virsh", "suspend", CURRENT_VM], check=False)
-            
-        elif idx == 7: # Resume (RAM)
-            # This is the real virsh resume (unfreezes suspend)
-            run_cmd(["virsh", "resume", CURRENT_VM], check=False)
-            
-        elif idx == 8: # Force Stop
-            run_cmd(["virsh", "destroy", CURRENT_VM], check=False)
-            
-        elif idx == 9: # Switch VM
-            new_vm = input_box(stdscr, "Enter VM Name: ")
-            if new_vm: CURRENT_VM = new_vm
-            
-        elif idx == 10 or idx == -1: # Quit
-            break
+        elif idx == 6: run_cmd(["virsh", "suspend", CURRENT_VM], check=False)
+        elif idx == 7: run_cmd(["virsh", "resume", CURRENT_VM], check=False)
+        elif idx == 8: run_cmd(["virsh", "destroy", CURRENT_VM], check=False)
+        elif idx == 9: switch_vm_menu(stdscr)
+        elif idx == 10 or idx == -1: break
 
 if __name__ == "__main__":
     check_root()
