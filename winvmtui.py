@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-winvmtui.py - Windows KVM Manager (v9: Custom Disk Size)
+winvmtui.py - Windows KVM Manager (v11: Delete Feature)
 
 Updates:
-1. FEATURE: Now prompts for Disk Size during creation (Default: 128G).
-2. RETAINS: Win11 Q35, Resume-to-Boot, and Permission fixes.
+1. FEATURE: Added 'Delete VM' option to cleanly remove VM and files.
+2. RETAINS: All previous Win11/Q35/ACL fixes.
 
 Usage: sudo python3 winvmtui.py
 """
@@ -16,10 +16,7 @@ import os
 import sys
 import subprocess
 import time
-import re
-import urllib.request
 import shutil
-import pwd
 
 # --- Configuration ---
 SUDO_USER = os.environ.get('SUDO_USER')
@@ -34,7 +31,7 @@ VIRTIO_ISO_PATH = os.path.join(VM_BASE_DIR, "virtio-win.iso")
 
 RAM_SIZE = 8192
 VCPUS = 4
-DEFAULT_DISK_SIZE = "128G" # Updated default
+DEFAULT_DISK_SIZE = "128G"
 CURRENT_VM = "windows-dev-vm"
 
 # --- Helpers ---
@@ -99,19 +96,16 @@ def run_cmd_live_debug(stdscr, cmd, title="Executing..."):
         return False, str(e)
 
 def check_system_health(stdscr):
-    # 1. Libvirt
     res = subprocess.run(["systemctl", "is-active", "libvirtd"], stdout=subprocess.PIPE, text=True)
     if res.stdout.strip() != "active":
         run_cmd_live_debug(stdscr, ["systemctl", "start", "libvirtd"], title="Starting Libvirt...")
         time.sleep(2)
 
-    # 2. Network 'default'
     net_state = run_cmd("virsh -c qemu:///system net-info default | grep Active", shell=True, check=False)
     if not net_state or "yes" not in net_state:
         run_cmd("virsh -c qemu:///system net-start default", shell=True, check=False)
         run_cmd("virsh -c qemu:///system net-autostart default", shell=True, check=False)
 
-    # 3. Dependencies
     if shutil.which("swtpm") is None:
         return "Missing 'swtpm'. Run 'Setup Host' again."
     
@@ -172,14 +166,12 @@ def download_with_progress(stdscr, url, filename):
     except Exception:
         return False
 
-# --- UI Components ---
-
 def draw_header(stdscr):
     h, w = stdscr.getmaxyx()
     stdscr.attron(curses.color_pair(4) | curses.A_BOLD)
     stdscr.move(0, 0)
     stdscr.clrtoeol()
-    header = f" WinVMTUI v9 | VM: {CURRENT_VM} "
+    header = f" WinVMTUI v11 | VM: {CURRENT_VM} "
     stdscr.addstr(0, 0, header)
     
     state = "Stopped"
@@ -195,18 +187,14 @@ def draw_header(stdscr):
 def msg_box(stdscr, msg, title="Message"):
     h, w = stdscr.getmaxyx()
     lines = msg.split('\n')
-    
     max_len = max([len(l) for l in lines]) if lines else 0
     box_w = min(w - 4, max_len + 6)
-    
-    # Simple wrap
     wrapped = []
     for l in lines:
         while len(l) > box_w - 4:
             wrapped.append(l[:box_w-4])
             l = l[box_w-4:]
         wrapped.append(l)
-        
     box_h = len(wrapped) + 4
     win = curses.newwin(box_h, box_w, h//2 - box_h//2, w//2 - box_w//2)
     win.box()
@@ -225,16 +213,13 @@ def selection_menu(stdscr, title, items):
         draw_header(stdscr)
         h, w = stdscr.getmaxyx()
         stdscr.addstr(2, 2, title, curses.A_UNDERLINE | curses.A_BOLD)
-        
         max_display = h - 6
         start = max(0, current_row - max_display + 1) if current_row >= max_display else 0
-        
         for i, item in enumerate(items[start:start+max_display]):
             if start + i == current_row:
                 stdscr.addstr(4+i, 4, f" {item} ", curses.A_REVERSE)
             else:
                 stdscr.addstr(4+i, 4, f" {item} ")
-        
         key = stdscr.getch()
         if key == curses.KEY_UP and current_row > 0: current_row -= 1
         elif key == curses.KEY_DOWN and current_row < len(items) - 1: current_row += 1
@@ -259,17 +244,54 @@ def file_browser(stdscr, start_path):
             dirs = [d for d in entries if os.path.isdir(os.path.join(current_path, d))]
             files = [f for f in entries if f.lower().endswith('.iso')]
             items = [".. (Go Up)"] + [f"/{d}" for d in dirs] + files
-            
             idx = selection_menu(stdscr, f"ISO Select: {current_path}", items)
             if idx == -1: return None
             sel = items[idx]
-            
             if sel == ".. (Go Up)": current_path = os.path.dirname(current_path)
             elif sel.startswith("/"): current_path = os.path.join(current_path, sel[1:])
             else: return os.path.join(current_path, sel)
         except: return None
 
-# --- Core Logic ---
+# --- Features ---
+
+def switch_vm_menu(stdscr):
+    global CURRENT_VM
+    if not os.path.exists(VM_BASE_DIR):
+        os.makedirs(VM_BASE_DIR, exist_ok=True)
+    vms_dirs = [d for d in os.listdir(VM_BASE_DIR) if os.path.isdir(os.path.join(VM_BASE_DIR, d))]
+    vms_dirs.sort()
+    if not vms_dirs:
+        msg_box(stdscr, "No VMs found in 'win_vms/' directory.")
+        return
+    items = vms_dirs + ["[ Cancel ]"]
+    idx = selection_menu(stdscr, "Select Active VM", items)
+    if idx != -1 and idx < len(vms_dirs):
+        CURRENT_VM = vms_dirs[idx]
+        msg_box(stdscr, f"Switched to: {CURRENT_VM}")
+
+def delete_vm_logic(stdscr):
+    # Confirm
+    sel = selection_menu(stdscr, f"DELETE VM '{CURRENT_VM}'?", ["NO, Cancel", "YES, DELETE EVERYTHING"])
+    if sel != 1: return
+
+    vm_dir = get_vm_dir(CURRENT_VM)
+    
+    # 1. Destroy & Undefine (Libvirt)
+    run_cmd_live_debug(stdscr, ["echo", f"Stopping & Undefining {CURRENT_VM}..."], title="Deleting...")
+    run_cmd(f"virsh -c qemu:///system destroy {CURRENT_VM}", shell=True, check=False)
+    time.sleep(1)
+    run_cmd(f"virsh -c qemu:///system undefine {CURRENT_VM} --nvram", shell=True, check=False)
+    
+    # 2. Delete Files
+    if os.path.exists(vm_dir):
+        run_cmd_live_debug(stdscr, ["echo", f"Removing directory: {vm_dir}"], title="Deleting...")
+        try:
+            shutil.rmtree(vm_dir)
+            msg_box(stdscr, f"VM '{CURRENT_VM}' and all files have been deleted.", title="Deleted")
+        except Exception as e:
+            msg_box(stdscr, f"Failed to delete directory: {e}", title="Error")
+    else:
+        msg_box(stdscr, f"VM '{CURRENT_VM}' unregistered, but directory not found.", title="Done")
 
 def force_cleanup_vm(stdscr, vm_name):
     run_cmd_live_debug(stdscr, ["echo", f"Cleaning up zombie VM: {vm_name}..."], title="Cleanup")
@@ -278,11 +300,28 @@ def force_cleanup_vm(stdscr, vm_name):
     run_cmd(f"virsh -c qemu:///system undefine {vm_name} --nvram", shell=True, check=False)
     time.sleep(0.5)
 
+def start_existing_vm(stdscr):
+    state = run_cmd(f"virsh -c qemu:///system domstate {CURRENT_VM}", shell=True, check=False)
+    if state and "running" in state:
+        msg_box(stdscr, f"VM '{CURRENT_VM}' is already running.\nOpening viewer...", title="Info")
+        launch_viewer_as_user(CURRENT_VM)
+        return
+    vm_exists = run_cmd(f"virsh -c qemu:///system dominfo {CURRENT_VM}", shell=True, check=False)
+    if not vm_exists:
+        msg_box(stdscr, f"VM '{CURRENT_VM}' does not exist in KVM.\nPlease create it first.", title="Error")
+        return
+    success, err = run_cmd_live_debug(stdscr, ["virsh", "-c", "qemu:///system", "start", CURRENT_VM], title="Starting VM...")
+    if success:
+        time.sleep(1)
+        launch_viewer_as_user(CURRENT_VM)
+        msg_box(stdscr, "VM Started successfully.\nViewer launched.", title="Success")
+    else:
+        msg_box(stdscr, f"Failed to start VM:\n{err}", title="Error")
+
 def setup_host(stdscr):
     pkgs = ["qemu-kvm", "libvirt-daemon-system", "libvirt-clients", "virtinst", "virt-viewer", "swtpm", "swtpm-tools", "acl", "ovmf"]
     run_cmd_live_debug(stdscr, ["apt", "update"], title="Updating...")
     run_cmd_live_debug(stdscr, ["apt", "install", "-y"] + pkgs, title="Installing...")
-    
     check_system_health(stdscr)
     if SUDO_USER:
         run_cmd(f"usermod -aG libvirt,kvm {SUDO_USER}", shell=True, check=False)
@@ -290,46 +329,32 @@ def setup_host(stdscr):
 
 def create_vm(stdscr):
     global CURRENT_VM
-    
     err = check_system_health(stdscr)
     if err:
         msg_box(stdscr, f"System Error: {err}", title="Pre-check Failed")
         return
-
-    # 1. Ask Name
     new_name = input_box(stdscr, f"Name [{CURRENT_VM}]: ", CURRENT_VM)
     if new_name: CURRENT_VM = new_name
-
-    # 2. Ask Disk Size (NEW FEATURE)
     disk_size = input_box(stdscr, f"Disk Size [{DEFAULT_DISK_SIZE}]: ", DEFAULT_DISK_SIZE)
     if not disk_size: disk_size = DEFAULT_DISK_SIZE
-    
     vm_dir = get_vm_dir(CURRENT_VM)
-    
     vm_exists = run_cmd(f"virsh -c qemu:///system dominfo {CURRENT_VM}", shell=True, check=False)
     if vm_exists or os.path.exists(vm_dir):
         sel = selection_menu(stdscr, f"VM '{CURRENT_VM}' exists!", ["Cancel", "Overwrite"])
         if sel != 1: return
         force_cleanup_vm(stdscr, CURRENT_VM)
         shutil.rmtree(vm_dir, ignore_errors=True)
-
     iso = file_browser(stdscr, os.path.join(USER_HOME, "Downloads"))
     if not iso: return
-    
     os.makedirs(vm_dir, exist_ok=True)
     if SUDO_USER: run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {vm_dir}", shell=True)
-    
     if not os.path.exists(VIRTIO_ISO_PATH):
         download_with_progress(stdscr, VIRTIO_URL, VIRTIO_ISO_PATH)
-
     disk_path = os.path.join(vm_dir, f"{CURRENT_VM}.qcow2")
     run_cmd_live_debug(stdscr, ["qemu-img", "create", "-f", "qcow2", disk_path, disk_size], title=f"Creating {disk_size} Disk...")
     if SUDO_USER: run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {disk_path}", shell=True)
-
     fix_permissions(stdscr, [iso, VIRTIO_ISO_PATH, disk_path, vm_dir])
-
     msg_box(stdscr, "IMPORTANT INSTRUCTIONS:\n1. Load Driver -> virtio-win -> amd64 -> w10\n2. Select 'Red Hat VirtIO SCSI controller'\n\nTIMING IS CRITICAL:\nThe VM will start in 'Paused' mode.\nOnce the window opens, click inside it, then press ENTER here to Resume.", title="READ CAREFULLY")
-
     install_cmd = [
         "virt-install",
         "--connect", "qemu:///system",
@@ -351,20 +376,14 @@ def create_vm(stdscr):
         "--noautoconsole",
         "--wait", "-1"
     ]
-    
     try:
         run_cmd_live_debug(stdscr, ["echo", "Initializing VM..."], title="Setup")
         subprocess.Popen(install_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
         time.sleep(2)
         run_cmd(f"virsh -c qemu:///system suspend {CURRENT_VM}", shell=True, check=False)
-        
         launch_viewer_as_user(CURRENT_VM)
-        
         msg_box(stdscr, "The VM is currently PAUSED.\n\n1. Ensure the 'virt-viewer' window is open.\n2. Click inside the viewer window.\n3. Get ready to press any key (Space/Enter).\n\nPress ENTER on this keyboard to RESUME VM.", title="Ready to Install?")
-        
         run_cmd(f"virsh -c qemu:///system resume {CURRENT_VM}", shell=True, check=False)
-        
     except Exception as e:
         msg_box(stdscr, f"Error: {e}", title="Exception")
 
@@ -373,20 +392,29 @@ def main(stdscr):
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_WHITE, -1)
     curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE)
-
     check_system_health(stdscr)
-
     while True:
-        opts = ["1. Setup Host (Install OVMF/TPM)", "2. Create Windows VM", "3. Open Desktop Viewer", "4. Force Stop VM", "Q. Quit"]
+        opts = [
+            "1. Setup Host (Install OVMF/TPM)", 
+            "2. Create New Windows VM", 
+            "3. Start Existing VM",
+            "4. Open Desktop Viewer", 
+            "5. Switch Active VM",
+            "6. Force Stop VM",
+            "7. Delete VM (Destroy & Delete Files)", # NEW
+            "Q. Quit"
+        ]
         idx = selection_menu(stdscr, "Main Menu", opts)
-        
         if idx == 0: setup_host(stdscr)
         elif idx == 1: create_vm(stdscr)
-        elif idx == 2: 
+        elif idx == 2: start_existing_vm(stdscr)
+        elif idx == 3: 
             curses.endwin()
             launch_viewer_as_user(CURRENT_VM)
-        elif idx == 3: force_cleanup_vm(stdscr, CURRENT_VM)
-        elif idx == 4 or idx == -1: break
+        elif idx == 4: switch_vm_menu(stdscr)
+        elif idx == 5: force_cleanup_vm(stdscr, CURRENT_VM)
+        elif idx == 6: delete_vm_logic(stdscr) # NEW
+        elif idx == 7 or idx == -1: break
 
 if __name__ == "__main__":
     check_root()
