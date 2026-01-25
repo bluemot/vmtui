@@ -307,6 +307,8 @@ packages:
   - pkgconf
   - bridge-utils
   - curl
+  - samba
+  - sshfs
 
 # Auto-Reboot to apply GRUB settings
 power_state:
