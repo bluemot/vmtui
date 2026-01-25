@@ -2,14 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-vmtui.py - KVM Manager (Directory Isolation Edition)
+vmtui.py - KVM Manager (Anti-Zombie Edition)
 
 Updates:
-1. VM Isolation: All files are stored in 'vms/{VM_NAME}/'.
-2. Switch VM: Auto-scan 'vms/' directory and show selection menu.
-3. Safety: Warning prompt before overwriting existing VMs.
-4. Auto-Reboot: VM reboots automatically after install to apply GRUB settings.
-5. Log Permissions: Auto-fix ownership to libvirt-qemu:kvm.
+1. Zombie Fix: Detects and removes leftover VM definitions in Libvirt even if the directory is gone.
+2. Self-Elevation: Auto-runs with 'sudo' if user forgets.
+3. VM Isolation: All files are stored in 'vms/{VM_NAME}/'.
+4. Switch VM: Auto-scan 'vms/' directory.
+5. Auto-Reboot: VM reboots automatically after install.
+6. Permissions: Auto-fix log file ownership.
 
 Author: Jules (AI Assistant)
 """
@@ -35,8 +36,7 @@ if SUDO_USER:
 else:
     USER_HOME = os.path.expanduser("~")
 
-# Base directory for all VM data (relative to this script)
-# Structure: ./vms/{vm_name}/{vm_name}.qcow2
+# Base directory for all VM data
 VM_BASE_DIR = os.path.abspath("vms")
 
 HOST_SHARE_DIR = os.path.join(USER_HOME, "driver_projects")
@@ -44,7 +44,7 @@ RAM_SIZE = 4096
 VCPUS = 4
 DISK_SIZE = "20G"
 
-# Global State: The name of the VM we are currently managing
+# Global State
 CURRENT_VM = "driver-dev-vm"
 
 # Available OS Images
@@ -154,14 +154,10 @@ def download_with_progress(stdscr, url, filename):
         return False
 
 def check_root():
+    """Auto-elevate to root if not already running as root."""
     if os.geteuid() != 0:
-        print("需要 Root 權限，正在嘗試提權 (Requesting sudo)...")
-        # 使用 sudo 重啟目前的 script
-        # sys.executable 是 python 解譯器的路徑 (e.g., /usr/bin/python3)
-        # sys.argv 是目前的參數 (e.g., ['./vmtui.py'])
+        print("Requesting root permissions (sudo)...")
         args = ["sudo", sys.executable] + sys.argv
-
-        # os.execvp 會用新程序直接「取代」目前程序，不會產生 subprocess
         os.execvp("sudo", args)
 
 # --- Logic Functions ---
@@ -190,23 +186,32 @@ def create_vm_logic(stdscr, img_name, img_data):
     if new_name:
         CURRENT_VM = new_name
     
-    # 2. Prepare Directory & Check Overwrite
+    # 2. Check Overwrite (Directory OR Libvirt Domain)
     vm_dir = get_vm_dir(CURRENT_VM)
     
-    if os.path.exists(vm_dir):
-        # Warning!
-        choice = selection_menu(stdscr, f"WARNING: VM '{CURRENT_VM}' exists!", ["Cancel", "Overwrite (Destroy & Delete Data)"])
+    # [FIX] Check if VM exists in Libvirt (Zombie check)
+    dom_info = run_cmd(f"virsh dominfo {CURRENT_VM}", shell=True, check=False)
+    is_zombie = (dom_info is not None and "Id:" in dom_info)
+    dir_exists = os.path.exists(vm_dir)
+    
+    if dir_exists or is_zombie:
+        msg = f"WARNING: VM '{CURRENT_VM}' already exists!"
+        if is_zombie and not dir_exists:
+             msg += "\n(Found in Libvirt but directory is missing)"
+             
+        choice = selection_menu(stdscr, msg, ["Cancel", "Overwrite (Destroy & Recreate)"])
         if choice == 0 or choice == -1:
             return # Cancel
         
-        # Destroy and cleanup
+        # Cleanup Logic
         run_cmd(f"virsh destroy {CURRENT_VM}", shell=True, check=False)
-        run_cmd(f"virsh undefine {CURRENT_VM}", shell=True, check=False)
-        try:
-            shutil.rmtree(vm_dir)
-        except Exception as e:
-            msg_box(stdscr, f"Error removing directory: {e}")
-            return
+        run_cmd(f"virsh undefine {CURRENT_VM} --nvram", shell=True, check=False)
+        if dir_exists:
+            try:
+                shutil.rmtree(vm_dir)
+            except Exception as e:
+                msg_box(stdscr, f"Error removing directory: {e}")
+                return
 
     os.makedirs(vm_dir, exist_ok=True)
     if SUDO_USER:
@@ -219,8 +224,6 @@ def create_vm_logic(stdscr, img_name, img_data):
     seed_iso_path = os.path.join(vm_dir, "seed.iso")
     log_path = os.path.join(vm_dir, f"{CURRENT_VM}-console.log")
     
-    # Base image path (cache in VM_BASE_DIR or current dir to avoid redownloading for every VM?)
-    # Let's keep base images in VM_BASE_DIR root to share them.
     base_img_path = os.path.join(VM_BASE_DIR, img_data['file'])
 
     def log(msg, y):
@@ -281,6 +284,8 @@ runcmd:
   - chown ubuntu:ubuntu /home/ubuntu/host_share
   - echo "host_share /home/ubuntu/host_share virtiofs defaults 0 0" >> /etc/fstab
   - mount -a
+  - systemctl enable serial-getty@ttyS0.service
+  - systemctl start serial-getty@ttyS0.service
 
 packages:
   - build-essential
@@ -325,7 +330,9 @@ power_state:
         f"--disk=path={disk_path},device=disk,bus=virtio",
         "--disk=path={seed_iso_path},device=cdrom".format(seed_iso_path=seed_iso_path),
         f"--os-variant={img_data['variant']}",
-        "--import", "--graphics", "none",
+        "--import",
+        "--graphics", "vnc,listen=0.0.0.0,port=5900,password=123456",
+        "--video", "qxl",
         "--serial", "pty", 
         "--serial", f"file,path={log_path}",
         "--console", "pty,target_type=serial",
