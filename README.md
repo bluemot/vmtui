@@ -217,3 +217,130 @@ hosts:          files [...] dns
 ```text
 hosts:          files [...] libvirt dns
 ````
+
+
+
+---
+
+# WinVMTUI - Windows KVM Manager
+
+**WinVMTUI** 是一個專為 Linux Host 設計的 Python TUI 工具，用於簡化 Windows 10/11 虛擬機在 KVM/QEMU 上的安裝與管理。
+
+它解決了在 Linux 上安裝 Windows VM 最頭痛的幾個問題：
+
+1. **驅動掛載**：自動下載並掛載 `virtio-win.iso`，解決安裝時找不到硬碟的問題。
+2. **Windows 11 支援**：自動配置 TPM 2.0 (swtpm)、UEFI (OVMF) 與 Q35 晶片組。
+3. **開機引導**：透過自動暫停 (Auto-Pause) 機制，讓你不會錯過 "Press any key to boot from CD" 的畫面。
+4. **權限修復**：自動處理 `libvirt-qemu` 無法讀取 ISO 或家目錄的權限問題 (ACL)。
+
+---
+
+## 📋 系統需求
+
+* **OS**: Ubuntu 22.04 / 24.04, Debian 12 (Host OS)
+* **Python**: Python 3.6+
+* **權限**: 需要 `sudo` 權限來管理 KVM 與網路。
+* **ISO**: 請自行準備微軟官方的 Windows 10 或 11 ISO 映像檔。
+
+## 🚀 快速開始
+
+### 1. 下載與執行
+
+不需要安裝額外的 Python 套件，直接下載腳本並執行：
+
+```bash
+# 賦予執行權限 (可選)
+chmod +x winvmtui.py
+
+# 必須使用 sudo 執行
+sudo python3 winvmtui.py
+
+```
+
+### 2. 主選單功能
+
+程式啟動後，你將看到以下選單：
+
+1. **Setup Host (Install OVMF/TPM)**
+* **首次使用必點**。會自動安裝 `qemu-kvm`, `virt-manager`, `swtpm` (TPM 模擬), `ovmf` (UEFI BIOS) 等必要套件，並設定網路。
+* *注意：安裝完後建議重開機一次。*
+
+
+2. **Create Windows VM**
+* 引導式建立 VM。支援自訂名稱、硬碟大小，並內建檔案瀏覽器選擇 ISO。
+
+
+3. **Open Desktop Viewer**
+* 開啟 `virt-viewer` 視窗連線到目前的 VM。
+
+
+4. **Force Stop VM**
+* 強制關閉 VM (拔電源)，用於安裝失敗或當機時。
+
+
+
+---
+
+## 💿 安裝流程詳解 (重要！)
+
+Windows 在 KVM 上的安裝與一般實體機不同，請務必閱讀以下步驟：
+
+### 步驟 A：建立 VM 與開機引導
+
+1. 選擇 **Create Windows VM**。
+2. 依序輸入 VM 名稱與硬碟大小 (例如 `128G`)。
+3. 在選單中找到你的 Windows ISO 檔案。
+4. **關鍵時刻**：腳本會啟動 VM 並**立即暫停 (Pause)**，同時彈出 `virt-viewer` 視窗。
+* 這是為了讓你準備好按鍵，以免錯過 Windows 的光碟開機提示。
+
+
+5. 確認視窗彈出後，點擊視窗內部，準備好你的鍵盤 (空白鍵或 Enter)。
+6. 回到終端機按下 **Enter** 恢復 VM，然後迅速在視窗內按鍵進入安裝程式。
+
+### 步驟 B：載入硬碟驅動 (Load Driver)
+
+在 Windows 安裝畫面選擇安裝位置時，你會發現**列表是空的 (找不到硬碟)**。這是正常的！因為 Windows 原生不支援高效能的 VirtIO 控制器。
+
+請依照以下步驟手動載入驅動：
+
+1. 點選左下角的 **載入驅動程式 (Load Driver)**。
+2. 點選 **瀏覽 (Browse)**。
+3. 選擇光碟機 **`virtio-win`** (注意：不是 Windows 安裝光碟)。
+4. 路徑：`amd64` -> `w10` (Windows 10/11 都選這個)。
+5. 選擇出現的 **"Red Hat VirtIO SCSI controller"** 並點擊下一步。
+6. 現在硬碟應該就會出現了！繼續安裝即可。
+
+---
+
+## 🛠️ 安裝後設定 (Post-Install)
+
+安裝完成並進入 Windows 桌面後，解析度可能會很低，且滑鼠移動不順暢。請執行以下步驟安裝 Guest Tools：
+
+### 1. 安裝驅動包
+
+1. 在 VM 內打開檔案總管，進入 **`virtio-win`** 光碟機。
+2. 執行 **`virtio-win-guest-tools.exe`**。
+3. 一路 Next 安裝到底，完成後**重新啟動 VM**。
+
+### 2. 調整解析度與全螢幕
+
+重開機後：
+
+* **自動縮放**：直接拉動 `virt-viewer` 的視窗邊緣，Windows 解析度會自動隨之調整。
+* **全螢幕**：點選視窗選單的 `View` -> `Full Screen` (或按 `F11`)。
+
+---
+
+## ❓ 常見問題
+
+**Q: 出現 "No bootable device" 錯誤？**
+A: 這通常是因為錯過了 "Press any key to boot from CD..." 的時機。
+
+* 請使用腳本的 **暫停/恢復** 機制。
+* 或者在開機時瘋狂按 **`Esc`** 進入 BIOS 選單，手動選擇從 DVD/CDROM 開機。
+
+**Q: 出現 "unable to connect to libvirt"？**
+A: 請確認你有使用 `sudo` 執行腳本。如果剛安裝完 Host 環境，請嘗試重開機或執行 `sudo systemctl start libvirtd`。
+
+**Q: 安裝時找不到硬碟？**
+A: 請參考上方的 [步驟 B：載入硬碟驅動](https://www.google.com/search?q=%23%E6%AD%A5%E9%A9%9F-b%E8%BC%89%E5%85%A5%E7%A1%AC%E7%A2%9F%E9%A9%85%E5%8B%95-load-driver)，這是 KVM 安裝 Windows 的必經之路。
