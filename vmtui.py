@@ -528,6 +528,28 @@ def input_box(stdscr, prompt):
     curses.noecho()
     return inp.decode('utf-8')
 
+def delete_vm_logic(stdscr):
+    # Confirm
+    sel = selection_menu(stdscr, f"DELETE VM '{CURRENT_VM}'?", ["NO, Cancel", "YES, DELETE EVERYTHING"])
+    if sel != 1: return
+
+    vm_dir = get_vm_dir(CURRENT_VM)
+
+    # 1. Destroy & Undefine (Libvirt)
+    run_cmd_live(stdscr, ["virsh", "destroy", CURRENT_VM], title="Stopping VM...")
+    run_cmd(["virsh", "undefine", CURRENT_VM, "--nvram"], check=False)
+
+    # 2. Delete Files
+    if os.path.exists(vm_dir):
+        try:
+            shutil.rmtree(vm_dir)
+            msg_box(stdscr, f"VM '{CURRENT_VM}' and all files have been deleted.")
+            switch_vm_menu(stdscr)
+        except Exception as e:
+            msg_box(stdscr, f"Failed to delete directory: {e}")
+    else:
+        msg_box(stdscr, f"VM '{CURRENT_VM}' unregistered, but directory not found.")
+
 # --- Main ---
 def main(stdscr):
     curses.start_color()
@@ -549,6 +571,7 @@ def main(stdscr):
         "7. Pause (Freeze in RAM)",
         "8. Resume (Unfreeze RAM)",
         "9. Force Stop VM",
+        "10. Delete VM",
         "A. Switch Active VM (Select from List)",
         "Q. Quit"
     ]
@@ -575,8 +598,9 @@ def main(stdscr):
         elif idx == 6: run_cmd(["virsh", "suspend", CURRENT_VM], check=False)
         elif idx == 7: run_cmd(["virsh", "resume", CURRENT_VM], check=False)
         elif idx == 8: run_cmd(["virsh", "destroy", CURRENT_VM], check=False)
-        elif idx == 9: switch_vm_menu(stdscr)
-        elif idx == 10 or idx == -1: break
+        elif idx == 9: delete_vm_logic(stdscr)
+        elif idx == 10: switch_vm_menu(stdscr)
+        elif idx == 11 or idx == -1: break
 
 if __name__ == "__main__":
     check_root()
