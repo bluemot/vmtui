@@ -26,6 +26,7 @@ import urllib.error
 import pwd
 import grp
 import shutil
+import json
 
 # --- Configuration ---
 
@@ -36,8 +37,60 @@ if SUDO_USER:
 else:
     USER_HOME = os.path.expanduser("~")
 
-# Base directory for all VM data
-VM_BASE_DIR = os.path.abspath("vms")
+CONFIG_FILE = "vmtui.json"
+DEFAULT_VM_BASE_DIR = os.path.abspath("vms")
+VM_BASE_DIR = DEFAULT_VM_BASE_DIR
+
+def load_config():
+    global VM_BASE_DIR
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+                VM_BASE_DIR = config.get("vm_base_dir", DEFAULT_VM_BASE_DIR)
+        except Exception:
+            pass
+
+def save_config():
+    config = {"vm_base_dir": VM_BASE_DIR}
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+    except Exception:
+        pass
+
+def configure_storage_path(stdscr):
+    global VM_BASE_DIR
+    current = VM_BASE_DIR
+    
+    stdscr.clear()
+    draw_header(stdscr)
+    
+    msg_box(stdscr, f"Current VM Storage Path:\n{current}\n\nNote: Changing this does not move existing VMs.\nIt only changes where VMTUI looks for and creates VMs.")
+    
+    new_path = input_box(stdscr, f"New Path: ")
+    if new_path:
+        # Expand user path if needed
+        new_path = os.path.expanduser(new_path)
+        new_path = os.path.abspath(new_path)
+        
+        # Confirm
+        sel = selection_menu(stdscr, f"Set path to: {new_path}?", ["No", "Yes"])
+        if sel == 1:
+            VM_BASE_DIR = new_path
+            save_config()
+            
+            # Ensure directory exists
+            if not os.path.exists(VM_BASE_DIR):
+                try:
+                    os.makedirs(VM_BASE_DIR, exist_ok=True)
+                    if SUDO_USER:
+                        run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {VM_BASE_DIR}", shell=True)
+                    msg_box(stdscr, f"Directory created and path saved:\n{VM_BASE_DIR}")
+                except Exception as e:
+                    msg_box(stdscr, f"Error creating directory: {e}")
+            else:
+                msg_box(stdscr, f"Path saved:\n{VM_BASE_DIR}")
 
 HOST_SHARE_DIR = os.path.join(USER_HOME, "driver_projects")
 RAM_SIZE = 4096
@@ -700,6 +753,7 @@ def delete_vm_logic(stdscr):
 
 # --- Main ---
 def main(stdscr):
+    load_config()
     curses.start_color()
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_WHITE, -1)
@@ -720,6 +774,7 @@ def main(stdscr):
         "8. Resume (Unfreeze RAM)",
         "9. Force Stop VM",
         "10. Delete VM",
+        "11. Configure Storage Path",
         "A. Switch Active VM (Select from List)",
         "Q. Quit"
     ]
@@ -747,8 +802,9 @@ def main(stdscr):
         elif idx == 7: run_cmd(["virsh", "resume", CURRENT_VM], check=False)
         elif idx == 8: run_cmd(["virsh", "destroy", CURRENT_VM], check=False)
         elif idx == 9: delete_vm_logic(stdscr)
-        elif idx == 10: switch_vm_menu(stdscr)
-        elif idx == 11 or idx == -1: break
+        elif idx == 10: configure_storage_path(stdscr)
+        elif idx == 11: switch_vm_menu(stdscr)
+        elif idx == 12 or idx == -1: break
 
 if __name__ == "__main__":
     check_root()
