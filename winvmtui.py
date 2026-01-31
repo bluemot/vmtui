@@ -327,6 +327,37 @@ def setup_host(stdscr):
         run_cmd(f"usermod -aG libvirt,kvm {SUDO_USER}", shell=True, check=False)
     msg_box(stdscr, "Host Setup Complete.\n(Please REBOOT if you just installed 'ovmf')")
 
+def get_host_interfaces():
+    """Returns a list of active network interfaces (excluding lo, virbr, docker)."""
+    interfaces = []
+    try:
+        # Get list of interfaces
+        result = subprocess.run(['ip', '-o', 'link', 'show'], stdout=subprocess.PIPE, text=True)
+        for line in result.stdout.split('\n'):
+            parts = line.split(': ')
+            if len(parts) >= 2:
+                iface = parts[1].strip()
+                # Filter out loopback, virtual bridges, and down interfaces
+                if iface != 'lo' and not iface.startswith('virbr') and not iface.startswith('docker') and 'state UP' in line:
+                    interfaces.append(iface)
+    except Exception:
+        pass
+    return interfaces
+
+def get_physical_partitions():
+    """Scans for unmounted physical partitions."""
+    out = run_cmd(["lsblk", "-lpno", "NAME,SIZE,TYPE,MOUNTPOINT"], check=False)
+    if not out: return []
+    candidates = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 3: continue
+        name, size, dtype = parts[0], parts[1], parts[2]
+        if len(parts) > 3 and parts[3].startswith("/"): continue
+        if any(x in name for x in ["loop", "ram", "sr"]): continue
+        candidates.append(f"{name} | {size} | {dtype}")
+    return candidates
+
 def create_vm(stdscr):
     global CURRENT_VM
     err = check_system_health(stdscr)
@@ -335,8 +366,63 @@ def create_vm(stdscr):
         return
     new_name = input_box(stdscr, f"Name [{CURRENT_VM}]: ", CURRENT_VM)
     if new_name: CURRENT_VM = new_name
+    
+    # --- Network Selection ---
+    net_mode = "nat"
+    net_source = "default"
+    network_arg = ["--network", "network=default,model=virtio"]
+
+    net_choice = selection_menu(stdscr, "Select Network Mode", [
+        "NAT (Default) - Host can connect, isolated from LAN",
+        "Bridge / Macvtap - LAN can connect, Host CANNOT connect",
+        "Dual Mode (Recommended) - 2 NICs: Best of both worlds"
+    ])
+    
+    if net_choice == 1: # Bridge
+        msg_box(stdscr, "IMPORTANT: Bridge Mode (Macvtap)\n\nHost <-> VM communication is BLOCKED.\nUse this only if you don't need to control VM from Host.", title="Bridge Mode Info")
+        ifaces = get_host_interfaces()
+        if ifaces:
+            iface_idx = selection_menu(stdscr, "Select Physical Interface to Bridge", ifaces)
+            if iface_idx != -1:
+                net_mode = "bridge"
+                net_source = ifaces[iface_idx]
+                network_arg = ["--network", f"type=direct,source={net_source},source_mode=bridge,model=virtio"]
+        else:
+            msg_box(stdscr, "No suitable interfaces found. Falling back to NAT.")
+
+    elif net_choice == 2: # Dual Mode
+        msg_box(stdscr, "Dual Mode Info:\n\nNIC 1 (NAT): Use this IP for Host -> VM connection.\nNIC 2 (Bridge): Use this IP for External -> VM connection.", title="Dual Mode")
+        ifaces = get_host_interfaces()
+        if ifaces:
+            iface_idx = selection_menu(stdscr, "Select Physical Interface for Secondary NIC", ifaces)
+            if iface_idx != -1:
+                net_mode = "dual"
+                net_source = ifaces[iface_idx]
+                network_arg = [
+                    "--network", "network=default,model=virtio",
+                    "--network", f"type=direct,source={net_source},source_mode=bridge,model=virtio"
+                ]
+        else:
+            msg_box(stdscr, "No interfaces found. Falling back to NAT.")
+
     disk_size = input_box(stdscr, f"Disk Size [{DEFAULT_DISK_SIZE}]: ", DEFAULT_DISK_SIZE)
     if not disk_size: disk_size = DEFAULT_DISK_SIZE
+
+    # --- Physical Partition Selection ---
+    extra_disk_opts = []
+    want_phys = selection_menu(stdscr, "Pass-through Physical Partition?", ["No", "Yes"])
+    if want_phys == 1:
+        parts = get_physical_partitions()
+        if not parts:
+            msg_box(stdscr, "No suitable unmounted partitions found.")
+        else:
+            p_idx = selection_menu(stdscr, "Select Partition (DANGEROUS: EXCLUSIVE ACCESS)", parts + ["Cancel"])
+            if p_idx != -1 and p_idx < len(parts):
+                sel_part = parts[p_idx].split("|")[0].strip()
+                c_idx = selection_menu(stdscr, f"Confirm usage of {sel_part}?", ["NO", "YES"])
+                if c_idx == 1:
+                    extra_disk_opts = ["--disk", f"path={sel_part},device=disk,bus=virtio,cache=none"]
+
     vm_dir = get_vm_dir(CURRENT_VM)
     vm_exists = run_cmd(f"virsh -c qemu:///system dominfo {CURRENT_VM}", shell=True, check=False)
     if vm_exists or os.path.exists(vm_dir):
@@ -355,6 +441,7 @@ def create_vm(stdscr):
     if SUDO_USER: run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {disk_path}", shell=True)
     fix_permissions(stdscr, [iso, VIRTIO_ISO_PATH, disk_path, vm_dir])
     msg_box(stdscr, "IMPORTANT INSTRUCTIONS:\n1. Load Driver -> virtio-win -> amd64 -> w10\n2. Select 'Red Hat VirtIO SCSI controller'\n\nTIMING IS CRITICAL:\nThe VM will start in 'Paused' mode.\nOnce the window opens, click inside it, then press ENTER here to Resume.", title="READ CAREFULLY")
+    
     install_cmd = [
         "virt-install",
         "--connect", "qemu:///system",
@@ -375,7 +462,8 @@ def create_vm(stdscr):
         "--tpm", "backend.type=emulator,backend.version=2.0,model=tpm-tis",
         "--noautoconsole",
         "--wait", "-1"
-    ]
+    ] + network_arg + extra_disk_opts
+
     try:
         run_cmd_live_debug(stdscr, ["echo", "Initializing VM..."], title="Setup")
         subprocess.Popen(install_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -384,6 +472,10 @@ def create_vm(stdscr):
         launch_viewer_as_user(CURRENT_VM)
         msg_box(stdscr, "The VM is currently PAUSED.\n\n1. Ensure the 'virt-viewer' window is open.\n2. Click inside the viewer window.\n3. Get ready to press any key (Space/Enter).\n\nPress ENTER on this keyboard to RESUME VM.", title="Ready to Install?")
         run_cmd(f"virsh -c qemu:///system resume {CURRENT_VM}", shell=True, check=False)
+        
+        # RDP Advice
+        msg_box(stdscr, "RDP SETUP ADVICE:\nWindows does not enable RDP by default.\n\nAfter installation:\n1. Settings -> System -> Remote Desktop -> Enable\n2. Note the IP address.\n3. Connect via RDP client.", title="Enable RDP")
+
     except Exception as e:
         msg_box(stdscr, f"Error: {e}", title="Exception")
 

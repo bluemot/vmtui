@@ -53,6 +53,14 @@ IMAGES = {
         "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
         "file": "ubuntu-24.04-server.img", "variant": "ubuntu24.04"
     },
+    "Ubuntu 24.04 Desktop": {
+        "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+        "file": "ubuntu-24.04-server.img", "variant": "ubuntu24.04", "type": "desktop"
+    },
+    "Ubuntu 24.04 KDE Dev": {
+        "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+        "file": "ubuntu-24.04-server.img", "variant": "ubuntu24.04", "type": "kde_dev"
+    },
     "Ubuntu 22.04 LTS": {
         "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
         "file": "ubuntu-22.04-server.img", "variant": "ubuntu22.04"
@@ -175,6 +183,37 @@ def setup_host_logic(stdscr):
     else:
         msg_box(stdscr, "Host Setup Failed.")
 
+def get_host_interfaces():
+    """Returns a list of active network interfaces (excluding lo, virbr, docker)."""
+    interfaces = []
+    try:
+        # Get list of interfaces
+        result = subprocess.run(['ip', '-o', 'link', 'show'], stdout=subprocess.PIPE, text=True)
+        for line in result.stdout.split('\n'):
+            parts = line.split(': ')
+            if len(parts) >= 2:
+                iface = parts[1].strip()
+                # Filter out loopback, virtual bridges, and down interfaces
+                if iface != 'lo' and not iface.startswith('virbr') and not iface.startswith('docker') and 'state UP' in line:
+                    interfaces.append(iface)
+    except Exception:
+        pass
+    return interfaces
+
+def get_physical_partitions():
+    """Scans for unmounted physical partitions."""
+    out = run_cmd(["lsblk", "-lpno", "NAME,SIZE,TYPE,MOUNTPOINT"], check=False)
+    if not out: return []
+    candidates = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 3: continue
+        name, size, dtype = parts[0], parts[1], parts[2]
+        if len(parts) > 3 and parts[3].startswith("/"): continue
+        if any(x in name for x in ["loop", "ram", "sr"]): continue
+        candidates.append(f"{name} | {size} | {dtype}")
+    return candidates
+
 def create_vm_logic(stdscr, img_name, img_data):
     """
     Creates a new VM in its own directory: vms/{CURRENT_VM}/
@@ -185,7 +224,61 @@ def create_vm_logic(stdscr, img_name, img_data):
     new_name = input_box(stdscr, f"VM Name [{CURRENT_VM}]: ")
     if new_name:
         CURRENT_VM = new_name
+
+    # --- Network Selection ---
+    net_mode = "nat"
+    net_source = "default"
+    network_args = ["--network", "network=default,model=virtio"] # Default NAT
     
+    net_choice = selection_menu(stdscr, "Select Network Mode", [
+        "NAT (Default) - Host can connect, isolated from LAN",
+        "Bridge / Macvtap - LAN can connect, Host CANNOT connect",
+        "Dual Mode (Recommended) - 2 NICs: Best of both worlds"
+    ])
+    
+    if net_choice == 1: # Bridge Only
+        msg_box(stdscr, "IMPORTANT: Bridge Mode (Macvtap)\n\nHost <-> VM communication is BLOCKED.\nUse this only if you don't need to control VM from Host.", title="Bridge Mode Info")
+        ifaces = get_host_interfaces()
+        if ifaces:
+            iface_idx = selection_menu(stdscr, "Select Physical Interface to Bridge", ifaces)
+            if iface_idx != -1:
+                net_mode = "bridge"
+                net_source = ifaces[iface_idx]
+                network_args = ["--network", f"type=direct,source={net_source},source_mode=bridge,model=virtio"]
+        else:
+            msg_box(stdscr, "No suitable interfaces found. Falling back to NAT.")
+
+    elif net_choice == 2: # Dual Mode
+        msg_box(stdscr, "Dual Mode Info:\n\nNIC 1 (NAT): Use this IP for Host -> VM connection.\nNIC 2 (Bridge): Use this IP for External -> VM connection.", title="Dual Mode")
+        ifaces = get_host_interfaces()
+        if ifaces:
+            iface_idx = selection_menu(stdscr, "Select Physical Interface for Secondary NIC", ifaces)
+            if iface_idx != -1:
+                net_mode = "dual"
+                net_source = ifaces[iface_idx]
+                # NIC 1: NAT, NIC 2: Bridge
+                network_args = [
+                    "--network", "network=default,model=virtio",
+                    "--network", f"type=direct,source={net_source},source_mode=bridge,model=virtio"
+                ]
+        else:
+            msg_box(stdscr, "No interfaces found. Falling back to NAT.")
+    
+    # --- Physical Partition Selection ---
+    extra_disk_opts = []
+    want_phys = selection_menu(stdscr, "Pass-through Physical Partition?", ["No", "Yes"])
+    if want_phys == 1:
+        parts = get_physical_partitions()
+        if not parts:
+            msg_box(stdscr, "No suitable unmounted partitions found.")
+        else:
+            p_idx = selection_menu(stdscr, "Select Partition (DANGEROUS: EXCLUSIVE ACCESS)", parts + ["Cancel"])
+            if p_idx != -1 and p_idx < len(parts):
+                sel_part = parts[p_idx].split("|")[0].strip()
+                c_idx = selection_menu(stdscr, f"Confirm usage of {sel_part}?", ["NO", "YES"])
+                if c_idx == 1:
+                    extra_disk_opts = ["--disk", f"path={sel_part},device=disk,bus=virtio,cache=none"]
+
     # 2. Check Overwrite (Directory OR Libvirt Domain)
     vm_dir = get_vm_dir(CURRENT_VM)
     
@@ -261,6 +354,41 @@ def create_vm_logic(stdscr, img_name, img_data):
     # 6. Generate Cloud-Init
     log("Generating Cloud-Init Configuration...", 5)
     
+    img_type = img_data.get('type')
+    is_desktop = img_type in ['desktop', 'kde_dev']
+    actual_ram = 8192 if is_desktop else RAM_SIZE
+    
+    extra_packages = ""
+    extra_runcmd = ""
+    
+    if img_type == 'desktop':
+        extra_packages = "  - ubuntu-desktop\n  - gnome-terminal"
+    elif img_type == 'kde_dev':
+        extra_packages = """  - kubuntu-desktop
+  - git
+  - tig
+  - openssh-server
+  - curl
+  - wget
+  - software-properties-common
+  - apt-transport-https"""
+        
+        # Commands to install Chrome and Edge
+        extra_runcmd = """
+  # Install Google Chrome
+  - wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-archive-keyring.gpg
+  - echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-archive-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main' | tee /etc/apt/sources.list.d/google-chrome.list
+  
+  # Install Microsoft Edge
+  - wget -q -O - https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > packages.microsoft.gpg
+  - install -D -o root -g root -m 644 packages.microsoft.gpg /etc/apt/keyrings/packages.microsoft.gpg
+  - sh -c 'echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/edge stable main" > /etc/apt/sources.list.d/microsoft-edge-dev.list'
+  - rm -f packages.microsoft.gpg
+  
+  # Update and Install Browsers
+  - apt-get update
+  - apt-get install -y google-chrome-stable microsoft-edge-stable"""
+
     user_data = f"""#cloud-config
 hostname: {CURRENT_VM}
 manage_etc_hosts: true
@@ -286,8 +414,16 @@ runcmd:
   - mount -a
   - systemctl enable serial-getty@ttyS0.service
   - systemctl start serial-getty@ttyS0.service
+  
+  # RDP Configuration
+  - adduser xrdp ssl-cert
+  - systemctl enable xrdp
+  - systemctl start xrdp
+  - ufw allow 3389/tcp || true{extra_runcmd}
 
 packages:
+{extra_packages}
+  - xrdp
   - build-essential
   - linux-headers-generic
   - bear
@@ -324,9 +460,21 @@ power_state:
     # 7. Install VM
     log("Launching VM via virt-install...", 7)
     
+    if is_desktop:
+        msg_box(stdscr, "NOTE: Desktop installation takes significantly longer\n(10-20 mins) on first boot to download/install UI packages.\nPlease be patient.")
+        stdscr.clear()
+        draw_header(stdscr)
+        log("Launching VM via virt-install...", 7)
+    
+    # Configure Network Argument
+    if net_mode == "bridge":
+        log(f"Using Bridge/Macvtap on {net_source}...", 6)
+    elif net_mode == "dual":
+        log(f"Using Dual Mode (NAT + Bridge on {net_source})...", 6)
+
     install_cmd = [
         "virt-install",
-        f"--name={CURRENT_VM}", f"--memory={RAM_SIZE}",
+        f"--name={CURRENT_VM}", f"--memory={actual_ram}",
         "--memorybacking", "source.type=memfd,access.mode=shared",
         f"--vcpus={VCPUS}",
         f"--disk=path={disk_path},device=disk,bus=virtio",
@@ -339,10 +487,10 @@ power_state:
         "--serial", f"file,path={log_path}",
         "--console", "pty,target_type=serial",
         f"--filesystem", f"source={HOST_SHARE_DIR},target=host_share,driver.type=virtiofs,accessmode=passthrough",
-        "--cpu", "host-passthrough",
-        "--network", "network=default,model=virtio",
+        "--cpu", "host-passthrough"
+    ] + network_args + [
         "--noautoconsole"
-    ]
+    ] + extra_disk_opts
     
     success = run_cmd_live(stdscr, install_cmd, title="Installing VM")
     
