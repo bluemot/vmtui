@@ -17,6 +17,8 @@ import sys
 import subprocess
 import time
 import shutil
+import json
+import urllib.request
 
 # --- Configuration ---
 SUDO_USER = os.environ.get('SUDO_USER')
@@ -25,7 +27,65 @@ if SUDO_USER:
 else:
     USER_HOME = os.path.expanduser("~")
 
-VM_BASE_DIR = os.path.abspath("win_vms")
+CONFIG_FILE = "winvmtui.json"
+DEFAULT_VM_BASE_DIR = os.path.abspath("win_vms")
+VM_BASE_DIR = DEFAULT_VM_BASE_DIR
+
+def load_config():
+    global VM_BASE_DIR
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+                VM_BASE_DIR = config.get("vm_base_dir", DEFAULT_VM_BASE_DIR)
+        except Exception:
+            pass
+
+def save_config():
+    config = {"vm_base_dir": VM_BASE_DIR}
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+    except Exception:
+        pass
+
+def configure_storage_path(stdscr):
+    global VM_BASE_DIR
+    current = VM_BASE_DIR
+    
+    stdscr.clear()
+    draw_header(stdscr)
+    
+    msg_box(stdscr, f"Current VM Storage Path:\n{current}\n\nNote: Changing this does not move existing VMs.\nIt only changes where WinVMTUI looks for and creates VMs.")
+    
+    new_path = input_box(stdscr, f"New Path: ")
+    if new_path:
+        # Expand user path if needed
+        new_path = os.path.expanduser(new_path)
+        new_path = os.path.abspath(new_path)
+        
+        # Confirm
+        sel = selection_menu(stdscr, f"Set path to: {new_path}?", ["No", "Yes"])
+        if sel == 1:
+            VM_BASE_DIR = new_path
+            save_config()
+            
+            # Ensure directory exists
+            if not os.path.exists(VM_BASE_DIR):
+                try:
+                    os.makedirs(VM_BASE_DIR, exist_ok=True)
+                    if SUDO_USER:
+                        run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {VM_BASE_DIR}", shell=True)
+                    msg_box(stdscr, f"Directory created and path saved:\n{VM_BASE_DIR}")
+                except Exception as e:
+                    msg_box(stdscr, f"Error creating directory: {e}")
+            else:
+                msg_box(stdscr, f"Path saved:\n{VM_BASE_DIR}")
+    
+    # Update globals dependent on VM_BASE_DIR if necessary
+    global VIRTIO_ISO_PATH
+    VIRTIO_ISO_PATH = os.path.join(VM_BASE_DIR, "virtio-win.iso")
+
 VIRTIO_URL = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 VIRTIO_ISO_PATH = os.path.join(VM_BASE_DIR, "virtio-win.iso")
 
@@ -476,10 +536,17 @@ def create_vm(stdscr):
         # RDP Advice
         msg_box(stdscr, "RDP SETUP ADVICE:\nWindows does not enable RDP by default.\n\nAfter installation:\n1. Settings -> System -> Remote Desktop -> Enable\n2. Note the IP address.\n3. Connect via RDP client.", title="Enable RDP")
 
+        # Network Driver Advice
+        msg_box(stdscr, "NETWORK DRIVER SETUP:\nWindows requires VirtIO drivers for network.\n\n1. Device Manager -> Other Devices -> Ethernet Controller\n2. Update Driver -> Browse -> CD Drive (virtio-win)\n3. Path: NetKVM -> w10 -> amd64\n4. Repeat for all adapters (Dual Mode = 2 adapters).", title="Network Drivers")
+
+        # Guest Tools Advice
+        msg_box(stdscr, "PERFORMANCE OPTIMIZATION:\nFor smooth graphics and better integration:\n\n1. Open CD Drive (virtio-win) inside the VM.\n2. Run 'virtio-win-guest-tools.exe'.\n3. This installs Video (QXL), Memory Balloon, and Agent drivers.\n4. Reboot the VM after installation.", title="Install Guest Tools")
+
     except Exception as e:
         msg_box(stdscr, f"Error: {e}", title="Exception")
 
 def main(stdscr):
+    load_config()
     curses.start_color()
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_WHITE, -1)
@@ -492,8 +559,9 @@ def main(stdscr):
             "3. Start Existing VM",
             "4. Open Desktop Viewer", 
             "5. Switch Active VM",
-            "6. Force Stop VM",
-            "7. Delete VM (Destroy & Delete Files)", # NEW
+            "6. Configure Storage Path", # NEW
+            "7. Force Stop VM",
+            "8. Delete VM (Destroy & Delete Files)", 
             "Q. Quit"
         ]
         idx = selection_menu(stdscr, "Main Menu", opts)
@@ -504,9 +572,10 @@ def main(stdscr):
             curses.endwin()
             launch_viewer_as_user(CURRENT_VM)
         elif idx == 4: switch_vm_menu(stdscr)
-        elif idx == 5: force_cleanup_vm(stdscr, CURRENT_VM)
-        elif idx == 6: delete_vm_logic(stdscr) # NEW
-        elif idx == 7 or idx == -1: break
+        elif idx == 5: configure_storage_path(stdscr) # NEW
+        elif idx == 6: force_cleanup_vm(stdscr, CURRENT_VM)
+        elif idx == 7: delete_vm_logic(stdscr) 
+        elif idx == 8 or idx == -1: break
 
 if __name__ == "__main__":
     check_root()
