@@ -122,3 +122,42 @@ When installing **Windows**, the installer will not see the virtual hard drive b
 ## 📝 License
 
 MIT License.
+
+---
+
+## 🛠️ 常見問題與排除 (FAQ in Chinese)
+
+**Q: 執行 Setup 後，VM 還是跑很慢？**
+A: 請確認 BIOS 中的 **VT-x / AMD-V** 虛擬化技術已開啟。
+執行 `kvm-ok` 指令檢查，如果顯示 `KVM acceleration can NOT be used`，請重開機進入 BIOS 開啟虛擬化選項。
+
+**Q: 無法登入 VM？**
+A: 預設使用者名稱為 `ubuntu`，密碼為 `password`。這是由 Cloud-init 在建立時自動設定的。
+
+**Q: 共享目錄在哪裡？**
+A:
+*   **Host 端**：預設位於你的家目錄下 `~/driver_projects`。
+*   **VM 端**：預設掛載於 `/home/ubuntu/host_share` (舊版為 `/mnt/host_share`)。
+
+**Q: USB 掛載失敗？**
+A: 請確認 VM 處於 Running 狀態。部分 USB 3.0 裝置可能需要特定的 Controller 驅動，但在大多數 Linux 開發情境下可直接運作。
+
+**Q: 如何透過 `ssh ubuntu@<vm-name>` 直接連線 (免查 IP)？**
+A: 在 Host 機器安裝 `libnss-libvirt` 套件：
+```bash
+sudo apt update
+sudo apt install libnss-libvirt
+```
+啟用模組：編輯 `/etc/nsswitch.conf`：
+```bash
+sudo nano /etc/nsswitch.conf
+```
+找到 `hosts:` 開頭的那一行，在 `files` 和 `dns` 之間加上 `libvirt`。
+修改前：
+```text
+hosts:          files [...] dns
+```
+修改後：
+```text
+hosts:          files [...] libvirt dns
+```
