@@ -12,7 +12,7 @@ sudo apt update
 
 echo "[INFO] Installing KVM, Libvirt, and virtualization tools..."
 # cloud-image-utils is needed to generate the configuration ISO (cloud-init)
-sudo apt install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst cloud-image-utils
+sudo apt install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst cloud-image-utils unzip wireless-tools
 sudo apt install -y virtiofsd
 echo "[INFO] Adding current user to libvirt and kvm groups..."
 sudo usermod -aG libvirt $USER
