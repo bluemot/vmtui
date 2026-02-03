@@ -90,21 +90,49 @@ If you have an existing VM folder (with a `.qcow2` file), use this to register i
 
 ---
 
-## 🔧 Windows Installation Tips
+## 💿 Windows 安裝流程詳解 (重要！)
 
-When installing **Windows**, the installer will not see the virtual hard drive by default. You must load the VirtIO drivers:
+Windows 在 KVM 上的安裝與一般實體機不同，請務必閱讀以下步驟：
 
-1.  When asked "Where do you want to install Windows?", click **Load driver**.
-2.  Click **Browse**.
-3.  Navigate to the `virtio-win` CD drive.
-4.  Go to `amd64` -> `w10` (Use w10 for Win10 and Win11).
-5.  Select **"Red Hat VirtIO SCSI controller"**.
-6.  The drive should now appear.
+### 步驟 A：建立 VM 與開機引導
 
-**After Installation (in Windows):**
-1.  Open the `virtio-win` CD drive in File Explorer.
-2.  Run `virtio-win-guest-tools.exe` to install network, video, and balloon drivers.
-3.  Reboot the VM.
+1.  選擇 **Create New VM** -> **Windows 10 / 11 (ISO Install)**。
+2.  依序輸入 VM 名稱與硬碟大小 (例如 `128G`)。
+3.  在選單中找到你的 Windows ISO 檔案。
+4.  **關鍵時刻**：VMTUI 會啟動 `virt-viewer` 視窗。請迅速點擊視窗內部，並按下任意鍵 (如 Enter) 以從 CD/DVD 開機。
+    *   *如果錯過了，請關閉視窗，使用 VMTUI 的 "Force Stop" 然後 "Start" 重試。*
+
+### 步驟 B：載入硬碟驅動 (Load Driver)
+
+在 Windows 安裝畫面選擇安裝位置時，你會發現**列表是空的 (找不到硬碟)**。這是正常的！因為 Windows 原生不支援高效能的 VirtIO 控制器。
+
+請依照以下步驟手動載入驅動：
+
+1.  點選左下角的 **載入驅動程式 (Load Driver)**。
+2.  點選 **瀏覽 (Browse)**。
+3.  選擇光碟機 **`virtio-win`** (注意：不是 Windows 安裝光碟)。
+4.  路徑：`amd64` -> `w10` (Windows 10/11 都選這個)。
+5.  選擇出現的 **"Red Hat VirtIO SCSI controller"** 並點擊下一步。
+6.  現在硬碟應該就會出現了！繼續安裝即可。
+
+---
+
+## 🛠️ Windows 安裝後設定 (Post-Install)
+
+安裝完成並進入 Windows 桌面後，解析度可能會很低，且滑鼠移動不順暢。請執行以下步驟安裝 Guest Tools：
+
+### 1. 安裝驅動包
+
+1.  在 VM 內打開檔案總管，進入 **`virtio-win`** 光碟機。
+2.  執行 **`virtio-win-guest-tools.exe`**。
+3.  一路 Next 安裝到底，完成後**重新啟動 VM**。
+
+### 2. 調整解析度與全螢幕
+
+重開機後：
+
+*   **自動縮放**：直接拉動 `virt-viewer` 的視窗邊緣，Windows 解析度會自動隨之調整。
+*   **全螢幕**：點選視窗選單的 `View` -> `Full Screen` (或按 `F11`)。
 
 ---
 
