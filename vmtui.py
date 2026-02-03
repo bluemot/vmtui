@@ -21,6 +21,7 @@ import subprocess
 import time
 import shutil
 import json
+import re
 import urllib.request
 import urllib.error
 import pwd
@@ -310,6 +311,80 @@ def file_browser(stdscr, start_path):
         except:
             return None
 
+def usb_menu_logic(stdscr):
+    """USB Manager with Auto-Refresh logic."""
+    if not CURRENT_VM:
+        msg_box(stdscr, "No Active VM selected.")
+        return
+
+    curses.curs_set(0)
+    current_row = 0
+    stdscr.timeout(2000) # Refresh device list every 2s
+    
+    while True:
+        # 1. Scan (Inside loop for auto-refresh)
+        devices = []
+        lsusb = run_cmd(["lsusb"])
+        if lsusb:
+            for line in lsusb.split('\n'):
+                m = re.search(r"Bus (\d+) Device (\d+): ID ([0-9a-fA-F]+):([0-9a-fA-F]+) (.+)", line)
+                if m:
+                    devices.append({'vid': m.group(3), 'pid': m.group(4), 'name': m.group(5)})
+        
+        xml = run_cmd(["virsh", "dumpxml", CURRENT_VM], check=False)
+        attached_sigs = []
+        if xml:
+            for d in devices:
+                if f"vendor id='0x{d['vid']}'" in xml and f"product id='0x{d['pid']}'" in xml:
+                    attached_sigs.append(f"{d['vid']}:{d['pid']}")
+
+        menu_items = []
+        for d in devices:
+            sig = f"{d['vid']}:{d['pid']}"
+            is_attached = sig in attached_sigs
+            status = "[ ATTACHED ]" if is_attached else "[   FREE   ]"
+            display = f"{status} {sig} - {d['name'][:40]}"
+            menu_items.append((display, d, is_attached))
+
+        if not menu_items: menu_items.append(("No USB Devices Found", None, False))
+        if current_row >= len(menu_items): current_row = max(0, len(menu_items) - 1)
+
+        stdscr.clear()
+        draw_header(stdscr)
+        stdscr.addstr(2, 2, "USB Device Manager (Auto-Refresh)", curses.A_BOLD | curses.A_UNDERLINE)
+        
+        for i, item in enumerate(menu_items):
+            display_str, _, is_attached = item
+            y = 4 + i
+            
+            attr = curses.color_pair(2) if is_attached else curses.color_pair(1)
+            if i == current_row: attr |= curses.A_REVERSE
+            stdscr.addstr(y, 4, display_str, attr)
+
+        stdscr.addstr(stdscr.getmaxyx()[0]-2, 2, "ENTER to Toggle, 'q' to Back")
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key == curses.KEY_UP and current_row > 0: current_row -= 1
+        elif key == curses.KEY_DOWN and current_row < len(menu_items) - 1: current_row += 1
+        elif key == ord('q') or key == 27: 
+            stdscr.timeout(-1) # Reset to blocking
+            break
+        elif key == ord('\n'):
+            sel_display, sel_dev, sel_attached = menu_items[current_row]
+            if sel_dev is None: continue
+
+            action = "detach-device" if sel_attached else "attach-device"
+            
+            xml_content = f"<hostdev mode='subsystem' type='usb' managed='yes'><source><vendor id='0x{sel_dev['vid']}'/><product id='0x{sel_dev['pid']}'/></source></hostdev>"
+            xml_path = "/tmp/vmtui_usb.xml"
+            with open(xml_path, "w") as f: f.write(xml_content)
+            
+            run_cmd(["virsh", action, CURRENT_VM, xml_path, "--live"], check=False)
+            time.sleep(0.5)
+        elif key == -1: # Timeout
+            continue
+
 # --- Logic: Host Setup ---
 
 def setup_host(stdscr):
@@ -574,6 +649,9 @@ def main(stdscr):
     load_config()
     curses.start_color()
     curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_WHITE, -1)
+    curses.init_pair(2, curses.COLOR_GREEN, -1)
+    curses.init_pair(3, curses.COLOR_RED, -1)
     curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE)
     
     # Initial check
@@ -585,9 +663,10 @@ def main(stdscr):
             "1. Create New VM (Linux / Windows)",
             "2. Switch Active VM",
             "3. Start Active VM / Open Viewer",
-            "4. Delete Active VM",
-            "5. Import / Rescue VM Directory",
-            "6. Host Setup (Install KVM/Drivers)",
+            "4. USB Manager",
+            "5. Delete Active VM",
+            "6. Import / Rescue VM Directory",
+            "7. Host Setup (Install KVM/Drivers)",
             "Q. Quit"
         ]
         
@@ -596,10 +675,11 @@ def main(stdscr):
         if idx == 0: create_vm_wizard(stdscr)
         elif idx == 1: switch_vm_menu(stdscr)
         elif idx == 2: start_vm(stdscr)
-        elif idx == 3: delete_vm(stdscr)
-        elif idx == 4: import_vm_logic(stdscr)
-        elif idx == 5: setup_host(stdscr)
-        elif idx == 6 or idx == -1: break
+        elif idx == 3: usb_menu_logic(stdscr)
+        elif idx == 4: delete_vm(stdscr)
+        elif idx == 5: import_vm_logic(stdscr)
+        elif idx == 6: setup_host(stdscr)
+        elif idx == 7 or idx == -1: break
 
 if __name__ == "__main__":
     # Auto-elevation
