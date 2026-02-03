@@ -366,7 +366,7 @@ def setup_host(stdscr):
     pkgs = [
         "qemu-kvm", "libvirt-daemon-system", "libvirt-clients", "virtinst", 
         "virt-viewer", "swtpm", "swtpm-tools", "acl", "ovmf", 
-        "cloud-image-utils", "virtiofsd", "unzip", "wireless-tools"
+        "cloud-image-utils", "virtiofsd", "unzip", "wireless-tools", "bridge-utils"
     ]
     if selection_menu(stdscr, "Install/Update KVM packages?", ["No", "Yes"]) == 1:
         run_cmd_live(stdscr, ["apt", "update"], title="Updating apt...")

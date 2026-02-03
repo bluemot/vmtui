@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.qcow2
+*.img
+*.iso
+*.log
+vms/
+win_vms/
+vms.json
+vmtui.json
