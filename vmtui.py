@@ -43,36 +43,44 @@ VM_REGISTRY_FILE = "vms.json"
 # Default directories
 DEFAULT_LINUX_DIR = os.path.abspath("vms")
 DEFAULT_WINDOWS_DIR = os.path.abspath("win_vms")
+COMMON_ISO_DIR = os.path.join(USER_HOME, "Downloads")
 HOST_SHARE_DIR = os.path.join(USER_HOME, "driver_projects")
+
+VIRTIO_URL = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso"
+
+LINUX_IMAGES = {
+    "Ubuntu 24.04 (Noble)": {
+        "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+        "file": "noble-server-cloudimg-amd64.img",
+        "variant": "ubuntu24.04"
+    },
+    "Ubuntu 22.04 (Jammy)": {
+        "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
+        "file": "jammy-server-cloudimg-amd64.img",
+        "variant": "ubuntu22.04"
+    },
+    "Debian 12 (Bookworm)": {
+        "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2",
+        "file": "debian-12-generic-amd64.qcow2",
+        "variant": "debian12"
+    }
+}
 
 # Global State
 VM_REGISTRY = {} # { "vm_name": "/path/to/vm_dir" }
 CURRENT_VM = ""
 
-# Linux Cloud Images
-LINUX_IMAGES = {
-    "Ubuntu 24.04 LTS": {
-        "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
-        "file": "ubuntu-24.04-server.img", "variant": "ubuntu24.04"
-    },
-    "Ubuntu 22.04 LTS": {
-        "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
-        "file": "ubuntu-22.04-server.img", "variant": "ubuntu22.04"
-    },
-    "Debian 12": {
-        "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2",
-        "file": "debian-12-generic.qcow2", "variant": "debian12"
-    }
-}
-
-# Windows Specifics
-VIRTIO_URL = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
-COMMON_ISO_DIR = os.path.join(DEFAULT_WINDOWS_DIR, "iso")
-
 # --- Config & Registry Management ---
 
 def load_config():
-    global VM_REGISTRY
+    global VM_REGISTRY, HOST_SHARE_DIR
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                conf = json.load(f)
+                HOST_SHARE_DIR = conf.get("host_share_dir", HOST_SHARE_DIR)
+        except Exception: pass
+
     if os.path.exists(VM_REGISTRY_FILE):
         try:
             with open(VM_REGISTRY_FILE, 'r') as f:
@@ -83,13 +91,19 @@ def load_config():
         scan_and_register(DEFAULT_LINUX_DIR)
         scan_and_register(DEFAULT_WINDOWS_DIR)
 
+def save_config():
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump({"host_share_dir": HOST_SHARE_DIR}, f, indent=4)
+    except Exception: pass
+
 def scan_and_register(base_dir):
     if os.path.exists(base_dir):
         for d in os.listdir(base_dir):
             p = os.path.join(base_dir, d)
             if os.path.isdir(p) and d not in VM_REGISTRY:
                 if os.path.exists(os.path.join(p, f"{d}.qcow2")):
-                    VM_REGISTRY[d] = p
+                    VM_REGISTRY[d] = {"dir": p, "host_share": HOST_SHARE_DIR}
         save_registry()
 
 def save_registry():
@@ -99,7 +113,16 @@ def save_registry():
     except Exception: pass
 
 def get_vm_dir(vm_name):
-    return VM_REGISTRY.get(vm_name)
+    entry = VM_REGISTRY.get(vm_name)
+    if isinstance(entry, dict):
+        return entry.get("dir")
+    return entry # Backward compatibility
+
+def get_vm_share(vm_name):
+    entry = VM_REGISTRY.get(vm_name)
+    if isinstance(entry, dict):
+        return entry.get("host_share", HOST_SHARE_DIR)
+    return HOST_SHARE_DIR
 
 def get_virtio_iso_path():
     return os.path.join(COMMON_ISO_DIR, "virtio-win.iso")
@@ -216,6 +239,7 @@ def draw_header(stdscr):
     if CURRENT_VM:
         res = run_cmd(f"virsh -c qemu:///system domstate {CURRENT_VM}", shell=True, check=False)
         if res: state = res.strip()
+        else: state = "Not Defined"
     
     status = f" Status: [{state}] "
     if len(header) + len(status) < w:
@@ -246,13 +270,37 @@ def msg_box(stdscr, msg, title="Message"):
     win.getch()
 
 def input_box(stdscr, prompt, default=""):
-    curses.echo()
+    curses.curs_set(1)
     h, w = stdscr.getmaxyx()
-    stdscr.addstr(h-3, 2, " " * (w-4))
-    stdscr.addstr(h-3, 2, prompt)
-    stdscr.addstr(h-3, len(prompt)+3, default, curses.A_DIM)
-    inp = stdscr.getstr(h-3, len(prompt)+3, 60).decode('utf-8').strip()
+    
+    # Box dimensions
+    box_w = min(max(60, len(prompt) + 20), w - 4)
+    box_h = 6
+    start_y = (h - box_h) // 2
+    start_x = (w - box_w) // 2
+    
+    win = curses.newwin(box_h, box_w, start_y, start_x)
+    win.box()
+    
+    # Title/Prompt
+    win.addstr(1, 2, prompt, curses.A_BOLD)
+    
+    # Default hint
+    if default:
+        win.addstr(3, 2, f"Default: {default}", curses.A_DIM)
+        
+    win.refresh()
+    
+    curses.echo()
+    try:
+        # Input field at line 2
+        inp = win.getstr(2, 2, box_w - 4).decode('utf-8').strip()
+    except curses.error:
+        inp = ""
+        
     curses.noecho()
+    curses.curs_set(0)
+    
     return inp if inp else default
 
 def selection_menu(stdscr, title, items):
@@ -282,21 +330,37 @@ def selection_menu(stdscr, title, items):
         elif key == ord('q') or key == 27: return -1
         elif key == -1: continue
 
-def file_browser(stdscr, start_path):
+def file_browser(stdscr, start_path, title="Select File"):
     current_path = os.path.abspath(start_path)
     if not os.path.exists(current_path): current_path = USER_HOME
     while True:
         try:
             entries = sorted(os.listdir(current_path))
             dirs = [d for d in entries if os.path.isdir(os.path.join(current_path, d))]
-            files = [f for f in entries if f.lower().endswith('.iso') or f.lower().endswith('.img')]
+            files = [f for f in entries if f.lower().endswith('.iso') or f.lower().endswith('.img') or f.lower().endswith('.qcow2')]
             items = [".. (Go Up)"] + [f"/{d}" for d in dirs] + files
-            idx = selection_menu(stdscr, f"Select ISO: {current_path}", items)
+            idx = selection_menu(stdscr, f"{title}: {current_path}", items)
             if idx == -1: return None
             sel = items[idx]
             if sel == ".. (Go Up)": current_path = os.path.dirname(current_path)
             elif sel.startswith("/"): current_path = os.path.join(current_path, sel[1:])
             else: return os.path.join(current_path, sel)
+        except: return None
+
+def directory_browser(stdscr, start_path, title="Select Directory"):
+    current_path = os.path.abspath(start_path)
+    if not os.path.exists(current_path): current_path = USER_HOME
+    while True:
+        try:
+            entries = sorted(os.listdir(current_path))
+            dirs = [d for d in entries if os.path.isdir(os.path.join(current_path, d))]
+            items = [" [ SELECT CURRENT DIRECTORY ] ", ".. (Go Up)"] + [f"/{d}" for d in dirs]
+            idx = selection_menu(stdscr, f"{title}: {current_path}", items)
+            if idx == -1: return None
+            sel = items[idx]
+            if sel == " [ SELECT CURRENT DIRECTORY ] ": return current_path
+            elif sel == ".. (Go Up)": current_path = os.path.dirname(current_path)
+            elif sel.startswith("/"): current_path = os.path.join(current_path, sel[1:])
         except: return None
 
 def usb_menu_logic(stdscr):
@@ -360,22 +424,109 @@ def usb_menu_logic(stdscr):
             time.sleep(0.5)
         elif key == -1: continue
 
+def cdrom_menu_logic(stdscr):
+    if not CURRENT_VM:
+        msg_box(stdscr, "No Active VM selected.")
+        return
+    
+    while True:
+        # Get list of CD-ROM devices
+        # Use domblklist to find devices with type 'cdrom' or ending in 'da'/'db' that are not disks
+        blk_info = run_cmd(f"virsh -c qemu:///system domblklist {CURRENT_VM} --details", shell=True, check=False)
+        cdroms = []
+        if blk_info:
+            for line in blk_info.split('\n'):
+                if "cdrom" in line or "rom" in line:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        target = parts[2]
+                        source = parts[3] if len(parts) > 3 else "[ Empty ]"
+                        cdroms.append({"target": target, "source": source})
+        
+        if not cdroms:
+            if selection_menu(stdscr, "No CD-ROM devices found. Add one?", ["Cancel", "Add Empty CD-ROM (sda)"]) == 1:
+                run_cmd(f"virsh -c qemu:///system attach-disk {CURRENT_VM} \"\" sda --type cdrom --mode readonly --config --targetbus sata", shell=True, check=False)
+                continue
+            return
+
+        menu_items = [f"Device: {c['target']} | Source: {os.path.basename(c['source'])}" for c in cdroms]
+        menu_items.append("Cancel")
+        
+        idx = selection_menu(stdscr, f"Manage CD-ROMs for {CURRENT_VM}", menu_items)
+        if idx == -1 or idx == len(cdroms): break
+        
+        selected_cd = cdroms[idx]
+        act_idx = selection_menu(stdscr, f"Action for {selected_cd['target']}", ["Insert ISO (Mount)", "Eject (Unmount)", "Back"])
+        
+        if act_idx == 0: # Insert
+            iso_start = os.path.join(USER_HOME, "Downloads")
+            iso_path = file_browser(stdscr, iso_start)
+            if iso_path:
+                fix_permissions(stdscr, [iso_path])
+                # Check VM state to decide flags
+                state = run_cmd(f"virsh -c qemu:///system domstate {CURRENT_VM}", shell=True, check=False)
+                flags = ["--config"]
+                if state and "running" in state:
+                    flags.append("--live")
+                
+                cmd = ["virsh", "-c", "qemu:///system", "change-media", CURRENT_VM, selected_cd['target'], iso_path] + flags
+                success, err = run_cmd_live(stdscr, cmd, title=f"Mounting {os.path.basename(iso_path)}...")
+                if not success: msg_box(stdscr, f"Failed to mount:\n{err}")
+        
+        elif act_idx == 1: # Eject
+            state = run_cmd(f"virsh -c qemu:///system domstate {CURRENT_VM}", shell=True, check=False)
+            flags = ["--config"]
+            if state and "running" in state:
+                flags.append("--live")
+                
+            cmd = ["virsh", "-c", "qemu:///system", "change-media", CURRENT_VM, selected_cd['target'], "--eject"] + flags
+            success, err = run_cmd_live(stdscr, cmd, title="Ejecting...")
+            if not success: msg_box(stdscr, f"Failed to eject:\n{err}")
+        
+        elif act_idx == 2: continue
+
 # --- Logic: Host Setup ---
 
+def change_host_share_path(stdscr):
+    global HOST_SHARE_DIR
+    new_path = directory_browser(stdscr, HOST_SHARE_DIR, "Select Host Share Directory")
+    if new_path:
+        HOST_SHARE_DIR = os.path.abspath(new_path)
+        try:
+            os.makedirs(HOST_SHARE_DIR, exist_ok=True)
+            if SUDO_USER:
+                run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {HOST_SHARE_DIR}", shell=True)
+        except Exception as e:
+            msg_box(stdscr, f"Error: {e}")
+        
+        save_config()
+        msg_box(stdscr, f"Shared Directory updated to:\n{HOST_SHARE_DIR}")
+
 def setup_host(stdscr):
-    pkgs = [
-        "qemu-kvm", "libvirt-daemon-system", "libvirt-clients", "virtinst", 
-        "virt-viewer", "swtpm", "swtpm-tools", "acl", "ovmf", 
-        "cloud-image-utils", "virtiofsd", "unzip", "wireless-tools", "bridge-utils"
-    ]
-    if selection_menu(stdscr, "Install/Update KVM packages?", ["No", "Yes"]) == 1:
-        run_cmd_live(stdscr, ["apt", "update"], title="Updating apt...")
-        run_cmd_live(stdscr, ["apt", "install", "-y"] + pkgs, title="Installing KVM Tools...")
-    
-    check_system_health(stdscr)
-    if SUDO_USER:
-        run_cmd(f"usermod -aG libvirt,kvm {SUDO_USER}", shell=True, check=False)
-    msg_box(stdscr, "Host Setup Complete.\nPlease reboot if you just installed these for the first time.")
+    while True:
+        opts = [
+            "1. Install/Update KVM Packages",
+            f"2. Change Host Share Directory (Current: {HOST_SHARE_DIR})",
+            "3. Back"
+        ]
+        choice = selection_menu(stdscr, "Host Setup Environment", opts)
+        
+        if choice == 0:
+            pkgs = [
+                "qemu-kvm", "libvirt-daemon-system", "libvirt-clients", "virtinst", 
+                "virt-viewer", "swtpm", "swtpm-tools", "acl", "ovmf", 
+                "cloud-image-utils", "virtiofsd", "unzip", "wireless-tools", "bridge-utils"
+            ]
+            run_cmd_live(stdscr, ["apt", "update"], title="Updating apt...")
+            run_cmd_live(stdscr, ["apt", "install", "-y"] + pkgs, title="Installing KVM Tools...")
+            check_system_health(stdscr)
+            if SUDO_USER:
+                run_cmd(f"usermod -aG libvirt,kvm {SUDO_USER}", shell=True, check=False)
+            msg_box(stdscr, "Host Setup Complete.\nPlease reboot if you just installed these for the first time.")
+        elif choice == 1:
+            change_host_share_path(stdscr)
+        else:
+            break
 
 # --- Logic: Create VM ---
 
@@ -455,8 +606,10 @@ def create_vm_wizard(stdscr):
     vm_dir = os.path.join(default_base, name)
     
     # Custom Path
-    custom = input_box(stdscr, "Customize Path? (Empty for default)", "")
-    if custom: vm_dir = os.path.join(os.path.abspath(custom), name)
+    vm_dir = os.path.join(default_base, name)
+    if selection_menu(stdscr, f"Use default path? ({vm_dir})", ["Yes, use default", "No, browse for custom path"]) == 1:
+        custom = directory_browser(stdscr, default_base, "Select Base Directory for VM")
+        if custom: vm_dir = os.path.join(custom, name)
 
     os.makedirs(vm_dir, exist_ok=True)
     if SUDO_USER: run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {vm_dir}", shell=True)
@@ -495,15 +648,17 @@ def create_windows_vm(stdscr, name, vm_dir, disk_path, iso, net_args):
         "virt-install", "--connect", "qemu:///system",
         f"--name={name}", "--machine", "q35",
         f"--memory=8192", "--vcpus=4",
-        f"--cdrom={iso}",
-        f"--disk=path={disk_path},device=disk,bus=virtio,format=qcow2",
-        f"--disk=path={virtio_iso},device=cdrom",
+        f"--disk=path={iso},device=cdrom,bus=sata,boot.order=1",
+        f"--disk=path={disk_path},device=disk,bus=virtio,format=qcow2,boot.order=2",
+        f"--disk=path={virtio_iso},device=cdrom,bus=sata,boot.order=3",
         "--os-variant=win10",
         "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
         "--channel", "spicevmc",
         "--cpu", "host-passthrough",
         "--boot", "uefi,menu=on",
         "--features", "smm=on",
+        "--memorybacking", "source.type=memfd,access.mode=shared",
+        f"--filesystem", f"source={HOST_SHARE_DIR},target=host_share,driver.type=virtiofs,accessmode=passthrough",
         "--tpm", "backend.type=emulator,backend.version=2.0,model=tpm-tis",
         "--noautoconsole"
     ] + net_args
@@ -638,12 +793,50 @@ def start_vm(stdscr):
         msg_box(stdscr, "No Active VM selected.")
         return
     state = run_cmd(f"virsh -c qemu:///system domstate {CURRENT_VM}", shell=True, check=False)
-    if state and "running" in state:
+    if not state:
+         msg_box(stdscr, f"VM '{CURRENT_VM}' is not defined in Libvirt.\nCannot start.")
+         return
+    if "running" in state:
         launch_viewer(CURRENT_VM)
         return
     success, err = run_cmd_live(stdscr, ["virsh", "-c", "qemu:///system", "start", CURRENT_VM], title="Starting...")
     if success: launch_viewer(CURRENT_VM)
     else: msg_box(stdscr, f"Error starting VM:\n{err}")
+
+def resize_vm_disk(stdscr):
+    if not CURRENT_VM:
+        msg_box(stdscr, "No Active VM selected.")
+        return
+        
+    # Get Disk Path
+    blklist = run_cmd(f"virsh -c qemu:///system domblklist {CURRENT_VM} --details", shell=True, check=False)
+    disk_path = None
+    if blklist:
+        for line in blklist.split('\n'):
+            # Look for file based disks (vda/sda)
+            if "disk" in line and "file" in line:
+                parts = line.split()
+                if len(parts) >= 4:
+                    disk_path = parts[-1] # Path is usually last
+                    break
+    
+    if not disk_path or not os.path.exists(disk_path):
+        # Fallback to Registry if VM is off/undefined
+        disk_path = os.path.join(get_vm_dir(CURRENT_VM), f"{CURRENT_VM}.qcow2")
+        if not os.path.exists(disk_path):
+             msg_box(stdscr, "Could not locate VM disk image.")
+             return
+
+    # User Input
+    size = input_box(stdscr, "Expand by (e.g. +10G, +50G): ", "+10G")
+    if not size or "+" not in size: return
+
+    if selection_menu(stdscr, f"Expand '{disk_path}' by {size}?", ["Cancel", "Confirm"]) == 1:
+        success, err = run_cmd_live(stdscr, ["qemu-img", "resize", disk_path, size], title="Resizing Disk...")
+        if success:
+            msg_box(stdscr, "Disk Expanded Successfully.\n\nIMPORTANT:\n1. Boot the VM.\n2. Open Disk Management (Windows) or 'gparted' (Linux).\n3. Extend the partition into the new unallocated space.")
+        else:
+            msg_box(stdscr, f"Error:\n{err}")
 
 def delete_vm(stdscr):
     if not CURRENT_VM: return
@@ -661,15 +854,93 @@ def delete_vm(stdscr):
 
 def import_vm_logic(stdscr):
     global CURRENT_VM, VM_REGISTRY
-    path = input_box(stdscr, "Path to existing VM directory: ", os.getcwd())
+    path = directory_browser(stdscr, os.getcwd(), "Select Existing VM Directory")
     if not path or not os.path.isdir(path): return
-    path = os.path.abspath(path)
     name = os.path.basename(path)
-    name = input_box(stdscr, "VM Name: ", name)
-    VM_REGISTRY[name] = path
+    name = input_box(stdscr, "Confirm/Edit VM Name: ", name)
+    if not name: return
+    
+    # Register in JSON
+    VM_REGISTRY[name] = {"dir": path, "host_share": HOST_SHARE_DIR}
     save_registry()
     CURRENT_VM = name
-    msg_box(stdscr, f"Imported '{name}'.")
+    
+    # Check Libvirt
+    dom_info = run_cmd(f"virsh -c qemu:///system dominfo {name}", shell=True, check=False)
+    if not dom_info or "Id:" not in dom_info:
+        if selection_menu(stdscr, f"VM '{name}' not in Libvirt. Restore from disk?", ["No", "Yes"]) == 1:
+            restore_vm_from_disk(stdscr, name, path)
+    else:
+        msg_box(stdscr, f"Imported '{name}'.")
+
+def restore_vm_from_disk(stdscr, name, path):
+    # Find Disk
+    disks = [f for f in os.listdir(path) if f.endswith('.qcow2')]
+    if not disks:
+        msg_box(stdscr, "No .qcow2 disk found in directory.")
+        return
+    
+    disk_path = os.path.join(path, disks[0])
+    if len(disks) > 1:
+        idx = selection_menu(stdscr, "Select Disk Image", disks)
+        if idx == -1: return
+        disk_path = os.path.join(path, disks[idx])
+        
+    os_type = selection_menu(stdscr, "Select OS Type for Restore", [
+        "Windows 10/11 (UEFI, VirtIO)",
+        "Linux (Generic VirtIO)"
+    ])
+    if os_type == -1: return
+
+    mem = input_box(stdscr, "Memory (MB): ", "4096")
+    cpus = input_box(stdscr, "vCPUs: ", "2")
+    
+    fix_permissions(stdscr, [disk_path, path])
+    
+    cmd = []
+    if os_type == 0: # Windows
+        virtio_iso = get_virtio_iso_path()
+        cmd = [
+            "virt-install", "--connect", "qemu:///system",
+            f"--name={name}", "--machine", "q35",
+            f"--memory={mem}", f"--vcpus={cpus}",
+            f"--disk=path={disk_path},device=disk,bus=virtio,format=qcow2,boot.order=1",
+            "--os-variant=win10",
+            "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
+            "--channel", "spicevmc",
+            "--cpu", "host-passthrough",
+            "--boot", "uefi,menu=on",
+            "--features", "smm=on",
+            "--memorybacking", "source.type=memfd,access.mode=shared",
+            f"--filesystem", f"source={HOST_SHARE_DIR},target=host_share,driver.type=virtiofs,accessmode=passthrough",
+            "--tpm", "backend.type=emulator,backend.version=2.0,model=tpm-tis",
+            "--import", "--noautoconsole"
+        ]
+        # Attach VirtIO ISO if exists, just in case drivers are needed
+        if os.path.exists(virtio_iso):
+             cmd.insert(8, f"--disk=path={virtio_iso},device=cdrom,bus=sata,boot.order=2")
+             
+    else: # Linux
+        cmd = [
+            "virt-install", "--connect", "qemu:///system",
+            f"--name={name}", 
+            f"--memory={mem}", f"--vcpus={cpus}",
+            "--memorybacking", "source.type=memfd,access.mode=shared",
+            f"--disk=path={disk_path},device=disk,bus=virtio",
+            "--os-variant=generic",
+            "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
+            "--channel", "spicevmc",
+            "--console", "pty,target_type=serial",
+            f"--filesystem", f"source={HOST_SHARE_DIR},target=host_share,driver.type=virtiofs,accessmode=passthrough",
+            "--cpu", "host-passthrough",
+            "--import", "--noautoconsole"
+        ]
+
+    success, err = run_cmd_live(stdscr, cmd, title=f"Restoring {name}...")
+    if success:
+        msg_box(stdscr, f"VM '{name}' restored and started!")
+    else:
+        msg_box(stdscr, f"Restore Failed:\n{err}")
 
 def switch_vm_menu(stdscr):
     global CURRENT_VM
@@ -682,6 +953,72 @@ def switch_vm_menu(stdscr):
         CURRENT_VM = vms[idx]
 
 # --- Main ---
+
+def edit_vm_settings(stdscr):
+    if not CURRENT_VM:
+        msg_box(stdscr, "No Active VM selected.")
+        return
+    
+    global VM_REGISTRY
+    entry = VM_REGISTRY.get(CURRENT_VM)
+    if not isinstance(entry, dict):
+        # Convert old format to new format on the fly
+        entry = {"dir": entry, "host_share": HOST_SHARE_DIR}
+        VM_REGISTRY[CURRENT_VM] = entry
+
+    current_share = entry.get("host_share", HOST_SHARE_DIR)
+    
+    opts = [
+        f"1. Set Host Share Path (Current: {current_share})",
+        "2. Manage CD-ROMs / ISOs",
+        "3. Back"
+    ]
+    
+    choice = selection_menu(stdscr, f"Settings for {CURRENT_VM}", opts)
+    if choice == 0:
+        new_path = directory_browser(stdscr, current_share, "Select Share Directory for THIS VM")
+        if new_path:
+            # Update Registry
+            entry["host_share"] = new_path
+            save_registry()
+            
+            # Update Libvirt XML if VM is defined
+            dom_info = run_cmd(f"virsh -c qemu:///system dominfo {CURRENT_VM}", shell=True, check=False)
+            if dom_info and "Id:" in dom_info:
+                update_vm_virtiofs_path(stdscr, CURRENT_VM, new_path)
+            
+            msg_box(stdscr, f"Settings updated for {CURRENT_VM}")
+    elif choice == 1:
+        cdrom_menu_logic(stdscr)
+
+def update_vm_virtiofs_path(stdscr, vm_name, new_path):
+    # This helper updates the XML of the VM to point to the new path
+    xml = run_cmd(f"virsh -c qemu:///system dumpxml {vm_name}", shell=True, check=False)
+    if xml and "virtiofs" in xml:
+        # Use a temporary python script to modify the path in XML
+        tmp_xml = "/tmp/vmtui_update.xml"
+        with open("/tmp/vmtui_old.xml", "w") as f: f.write(xml)
+        
+        py_cmd = f"""
+import xml.etree.ElementTree as ET
+tree = ET.parse('/tmp/vmtui_old.xml')
+root = tree.getroot()
+found = False
+for fs in root.findall('.//filesystem'):
+    driver = fs.find('driver')
+    if driver is not None and driver.get('type') == 'virtiofs':
+        source = fs.find('source')
+        if source is not None:
+            source.set('dir', '{new_path}')
+            found = True
+if found:
+    tree.write('{tmp_xml}')
+    print('OK')
+"""
+        res = run_cmd(["python3", "-c", py_cmd])
+        if res and "OK" in res:
+            run_cmd(f"virsh -c qemu:///system define {tmp_xml}", shell=True)
+            msg_box(stdscr, "Libvirt XML updated with new VirtioFS path.")
 
 def main(stdscr):
     load_config()
@@ -710,6 +1047,8 @@ def main(stdscr):
             "B. Force Stop VM",
             "C. Delete Active VM",
             "D. Import / Rescue VM Directory",
+            "E. Resize Active VM Disk",
+            "F. VM Individual Settings (Per-VM Config)",
             "Q. Quit"
         ]
         
@@ -732,7 +1071,9 @@ def main(stdscr):
         elif idx == 10: run_cmd(["virsh", "-c", "qemu:///system", "destroy", CURRENT_VM], check=False)
         elif idx == 11: delete_vm(stdscr)
         elif idx == 12: import_vm_logic(stdscr)
-        elif idx == 13 or idx == -1: break
+        elif idx == 13: resize_vm_disk(stdscr)
+        elif idx == 14: edit_vm_settings(stdscr)
+        elif idx == 15 or idx == -1: break
 
 if __name__ == "__main__":
     if os.geteuid() != 0:

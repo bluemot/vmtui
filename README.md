@@ -22,8 +22,11 @@ It combines the best features of Linux Cloud-Init automation and Windows ISO ins
 *   **VM Registry**: Tracks VMs across different storage paths using `vms.json`.
 *   **Zombie Cleanup**: Smart detection to clean up conflicting VM states (defined but missing files, or files without definition).
 *   **USB Hotplug**: Graphical menu to Attach/Detach host USB devices on the fly.
+*   **CD-ROM Management**: Easily mount/unmount ISO files to the VM's virtual CD-ROM drive while running.
+*   **Disk Expansion**: Expand existing VM disk images (`.qcow2`) directly from the menu.
+*   **Shared Folder Configuration**: Customize the host-side shared directory path globally or per-VM.
 *   **Power Management**: Start, Stop, Hibernate (Save to Disk), and Suspend (RAM).
-*   **Import/Rescue**: Import existing VM directories into the manager.
+*   **Import/Rescue**: Import existing VM directories and automatically restore Libvirt definitions.
 
 ---
 
@@ -86,7 +89,13 @@ Pass-through Host USB devices to the VM.
 Equivalent to pulling the power plug. Use if the VM is unresponsive.
 
 ### D. Import / Rescue VM Directory
-If you have an existing VM folder (with a `.qcow2` file), use this to register it with VMTUI.
+If you have an existing VM folder (with a `.qcow2` file), use this to register it with VMTUI. It will also attempt to restore the VM definition if it's missing from Libvirt.
+
+### E. Resize Active VM Disk
+Increase the capacity of your virtual disk. Note: After resizing the disk image, you still need to expand the partition inside the Guest OS using tools like Disk Management (Windows) or GParted (Linux).
+
+### F. VM Individual Settings
+Customize settings for the active VM, such as specific shared folder paths or managing connected CD-ROMs.
 
 ---
 
@@ -205,8 +214,11 @@ MIT License.
 *   **VM 註冊表**：透過 `vms.json` 追蹤分散在不同路徑的 VM。
 *   **殭屍清理 (Zombie Cleanup)**：智慧偵測並清除衝突的 VM 狀態 (有定義但無檔案，或有檔案無定義)。
 *   **USB 熱插拔**：圖形化選單，可即時掛載/卸載 Host USB 裝置。
+*   **CD-ROM 管理**：運行中可隨時更換或掛載/卸載 ISO 鏡像檔。
+*   **硬碟擴容**：直接從選單擴展現有的 VM 虛擬硬碟 (`.qcow2`) 大小。
+*   **自訂共享路徑**：可全局或針對個別 VM 自訂 Host 端的共享目錄路徑。
 *   **電源管理**：啟動、停止、休眠 (存至硬碟) 與暫停 (存至 RAM)。
-*   **匯入/救援**：將現有的 VM 目錄匯入至管理員中。
+*   **匯入/救援**：將現有的 VM 目錄匯入，並自動恢復 Libvirt 中的虛擬機定義。
 
 ---
 
@@ -268,8 +280,14 @@ sudo ./vmtui.py
 ### B. Force Stop VM
 相當於拔掉電源插頭。當 VM 無回應時使用。
 
-### D. Import / Rescue VM Directory
-如果你有一個現有的 VM 資料夾 (內含 `.qcow2` 檔)，使用此功能將其註冊到 VMTUI。
+### D. 匯入 / 救援 VM 目錄
+如果你有一個現有的 VM 資料夾 (內含 `.qcow2` 檔)，使用此功能將其註冊到 VMTUI。如果 Libvirt 中遺失了該定義，也會嘗試自動恢復。
+
+### E. 硬碟擴容 (Resize Disk)
+增加虛擬硬碟的容量。注意：在擴展硬碟鏡像後，你仍需要在 Guest OS 內部使用「磁碟管理」(Windows) 或 「GParted」(Linux) 來擴展分區。
+
+### F. 個別 VM 設定
+針對當前選取的 VM 進行個別設定，例如自訂共享資料夾路徑或管理掛載的 CD-ROM。
 
 ---
 
