@@ -85,6 +85,13 @@ def load_config():
         try:
             with open(VM_REGISTRY_FILE, 'r') as f:
                 VM_REGISTRY = json.load(f)
+                # Migration: Convert old string entries to dict
+                migrated = False
+                for k, v in VM_REGISTRY.items():
+                    if not isinstance(v, dict):
+                        VM_REGISTRY[k] = {"dir": v, "host_share": HOST_SHARE_DIR}
+                        migrated = True
+                if migrated: save_registry()
         except Exception:
             VM_REGISTRY = {}
     if not VM_REGISTRY:
@@ -601,12 +608,12 @@ def create_vm_wizard(stdscr):
         "Windows 10 / 11 (ISO Install)",
         "Linux Cloud Image (Auto-Install)"
     ])
+    if os_type == -1: return
     
     default_base = DEFAULT_WINDOWS_DIR if os_type == 0 else DEFAULT_LINUX_DIR
     vm_dir = os.path.join(default_base, name)
     
     # Custom Path
-    vm_dir = os.path.join(default_base, name)
     if selection_menu(stdscr, f"Use default path? ({vm_dir})", ["Yes, use default", "No, browse for custom path"]) == 1:
         custom = directory_browser(stdscr, default_base, "Select Base Directory for VM")
         if custom: vm_dir = os.path.join(custom, name)
@@ -632,7 +639,7 @@ def create_vm_wizard(stdscr):
         img_data = LINUX_IMAGES[img_names[idx]]
         create_linux_vm_cloud(stdscr, name, vm_dir, disk_path, disk_size, img_data, net_args)
 
-    VM_REGISTRY[name] = vm_dir
+    VM_REGISTRY[name] = {"dir": vm_dir, "host_share": HOST_SHARE_DIR}
     save_registry()
     CURRENT_VM = name
 
