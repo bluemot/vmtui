@@ -18,6 +18,7 @@ Usage: sudo python3 vmtui.py
 
 import curses
 import os
+os.environ.setdefault('ESCDELAY', '25')
 import sys
 import subprocess
 import time
