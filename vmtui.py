@@ -273,38 +273,68 @@ def run_cmd_live(stdscr, cmd, title="Executing..."):
     error_buffer = []
 
     try:
+        # Use a more robust way to read both streams without deadlocking
+        import select
         process = subprocess.Popen(
             cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
         )
+        
         while True:
-            retcode = process.poll()
-            line = process.stdout.readline()
-            if line:
-                output_buffer.append(line)
-                if win:
-                    try: win.addstr(line); win.refresh()
-                    except curses.error: pass
-            if retcode is not None:
-                rest_out = process.stdout.read()
-                if rest_out and win:
-                    try: win.addstr(rest_out); win.refresh()
-                    except curses.error: pass
+            # Wait for output on either stdout or stderr
+            reads = [process.stdout, process.stderr]
+            ret, _, _ = select.select(reads, [], [], 0.1)
+            
+            for r in ret:
+                line = r.readline()
+                if line:
+                    if r is process.stdout:
+                        output_buffer.append(line)
+                        if win:
+                            try: win.addstr(line); win.refresh()
+                            except curses.error: pass
+                    else:
+                        error_buffer.append(line)
+                        if win:
+                            try: win.addstr(line, curses.color_pair(3)); win.refresh()
+                            except curses.error: pass
+            
+            if process.poll() is not None:
+                # Read remaining output
+                for r in [process.stdout, process.stderr]:
+                    for line in r:
+                        if r is process.stdout:
+                            output_buffer.append(line)
+                            if win:
+                                try: win.addstr(line); win.refresh()
+                                except curses.error: pass
+                        else:
+                            error_buffer.append(line)
+                            if win:
+                                try: win.addstr(line, curses.color_pair(3)); win.refresh()
+                                except curses.error: pass
                 break
         
+        retcode = process.returncode
         if retcode == 0: return True, None
-        else: return False, "".join(error_buffer)
+        else: return False, "".join(error_buffer) if error_buffer else "Unknown error (retcode {})".format(retcode)
     except Exception as e: return False, str(e)
 
 def check_system_health(stdscr):
+    res = subprocess.run(["systemctl", "list-unit-files", "libvirtd.service"], stdout=subprocess.PIPE, text=True)
+    if "libvirtd.service" not in res.stdout:
+        msg_box(stdscr, "Error: libvirtd is not installed. Please run 'Setup Host Environment' first.")
+        return True # Error
+
     res = subprocess.run(["systemctl", "is-active", "libvirtd"], stdout=subprocess.PIPE, text=True)
     if res.stdout.strip() != "active":
         run_cmd_live(stdscr, ["systemctl", "start", "libvirtd"], title="Starting Libvirt...")
         time.sleep(2)
+    
     net_state = run_cmd("virsh -c qemu:///system net-info default | grep Active", shell=True, check=False)
     if not net_state or "yes" not in net_state:
         run_cmd("virsh -c qemu:///system net-start default", shell=True, check=False)
         run_cmd("virsh -c qemu:///system net-autostart default", shell=True, check=False)
-    return None
+    return False # OK
 
 def fix_permissions(stdscr, paths):
     if shutil.which("setfacl") is None:
@@ -758,12 +788,28 @@ def setup_host(stdscr):
         
         if choice == 0:
             pkgs = [
-                "qemu-kvm", "libvirt-daemon-system", "libvirt-clients", "virtinst", 
+                "qemu-system-x86", "libvirt-daemon-system", "libvirt-clients", "virtinst", 
                 "virt-viewer", "swtpm", "swtpm-tools", "acl", "ovmf", 
-                "cloud-image-utils", "virtiofsd", "unzip", "wireless-tools", "bridge-utils"
+                "cloud-image-utils", "unzip", "wireless-tools", "bridge-utils"
             ]
-            run_cmd_live(stdscr, ["apt", "update"], title="Updating apt...")
-            run_cmd_live(stdscr, ["apt", "install", "-y"] + pkgs, title="Installing KVM Tools...")
+            
+            # On newer Ubuntu (24.04+), virtiofsd is a separate package
+            try:
+                os_release = run_cmd("lsb_release -sc", shell=True, check=False)
+                if os_release and os_release.strip() not in ["focal", "jammy"]:
+                    pkgs.append("virtiofsd")
+            except: pass
+
+            success, err = run_cmd_live(stdscr, ["apt", "update"], title="Updating apt...")
+            if not success:
+                msg_box(stdscr, f"Apt update failed:\n{err}")
+                continue
+            
+            success, err = run_cmd_live(stdscr, ["apt", "install", "-y"] + pkgs, title="Installing KVM Tools...")
+            if not success:
+                msg_box(stdscr, f"Package installation failed:\n{err}")
+                continue
+
             check_system_health(stdscr)
             if SUDO_USER:
                 run_cmd(f"usermod -aG libvirt,kvm {SUDO_USER}", shell=True, check=False)
@@ -990,7 +1036,8 @@ manage_etc_hosts: true
 ssh_pwauth: true
 package_update: true
 package_upgrade: false
-output: {{all: '| tee -a /var/log/cloud-init-output.log > /dev/ttyS1'}}
+package_reboot_if_required: true
+output: {all: '| tee -a /var/log/cloud-init-output.log > /dev/ttyS1'}
 final_message: "CLOUD_INIT_FINISHED_SUCCESSFULLY"
 users:
   - name: ubuntu
