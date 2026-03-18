@@ -352,14 +352,16 @@ def fix_permissions(stdscr, paths):
 
 def download_with_progress(stdscr, url, filename):
     try:
+        logger.info(f"Downloading {url} to {filename}")
         os.makedirs(os.path.dirname(filename), exist_ok=True)
         h, w = stdscr.getmaxyx()
         box_w = min(60, w - 4)
         box_x = (w - box_w) // 2
         box_y = h // 2 - 2
-        
+
         with urllib.request.urlopen(url) as response:
             total_size = int(response.info().get('Content-Length', 0))
+            logger.debug(f"Total size: {total_size}")
             block_size = 8192
             downloaded = 0
             with open(filename, 'wb') as f:
@@ -379,9 +381,11 @@ def download_with_progress(stdscr, url, filename):
                             stdscr.refresh()
                         except curses.error:
                             pass
+        logger.info(f"Download complete: {filename}")
         return True
-    except Exception: return False
-
+    except Exception as e:
+        logger.error(f"Download failed: {e}")
+        return False
 # --- UI Helpers ---
 
 def draw_header(stdscr):
@@ -994,7 +998,10 @@ def create_linux_vm_cloud(stdscr, name, vm_dir, disk_path, disk_size, img_data, 
     os.makedirs(cache_dir, exist_ok=True)
     base_img = os.path.join(cache_dir, img_data['file'])
     
-    if not os.path.exists(base_img):
+    if os.path.exists(base_img):
+        logger.info(f"Using existing base image: {base_img}")
+    else:
+        logger.info(f"Base image not found, downloading: {img_data['url']}")
         if not download_with_progress(stdscr, img_data['url'], base_img):
             msg_box(stdscr, "Download Failed")
             return
@@ -1037,7 +1044,7 @@ ssh_pwauth: true
 package_update: true
 package_upgrade: false
 package_reboot_if_required: true
-output: {all: '| tee -a /var/log/cloud-init-output.log > /dev/ttyS1'}
+output: {{all: '| tee -a /var/log/cloud-init-output.log > /dev/ttyS1'}}
 final_message: "CLOUD_INIT_FINISHED_SUCCESSFULLY"
 users:
   - name: ubuntu
