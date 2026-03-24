@@ -273,50 +273,35 @@ def run_cmd_live(stdscr, cmd, title="Executing..."):
     error_buffer = []
 
     try:
-        # Use a more robust way to read both streams without deadlocking
-        import select
         process = subprocess.Popen(
             cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
         )
         
-        while True:
-            # Wait for output on either stdout or stderr
-            reads = [process.stdout, process.stderr]
-            ret, _, _ = select.select(reads, [], [], 0.1)
-            
-            for r in ret:
-                line = r.readline()
+        def read_stream(stream, buffer, window, is_err=False):
+            for line in iter(stream.readline, ''):
                 if line:
-                    if r is process.stdout:
-                        output_buffer.append(line)
-                        if win:
-                            try: win.addstr(line); win.refresh()
-                            except curses.error: pass
-                    else:
-                        error_buffer.append(line)
-                        if win:
-                            try: win.addstr(line, curses.color_pair(3)); win.refresh()
-                            except curses.error: pass
-            
-            if process.poll() is not None:
-                # Read remaining output
-                for r in [process.stdout, process.stderr]:
-                    for line in r:
-                        if r is process.stdout:
-                            output_buffer.append(line)
-                            if win:
-                                try: win.addstr(line); win.refresh()
-                                except curses.error: pass
-                        else:
-                            error_buffer.append(line)
-                            if win:
-                                try: win.addstr(line, curses.color_pair(3)); win.refresh()
-                                except curses.error: pass
-                break
+                    buffer.append(line)
+                    if window:
+                        try:
+                            if is_err:
+                                window.addstr(line, curses.color_pair(3))
+                            else:
+                                window.addstr(line)
+                            window.refresh()
+                        except curses.error:
+                            pass
         
-        retcode = process.returncode
+        t1 = threading.Thread(target=read_stream, args=(process.stdout, output_buffer, win))
+        t2 = threading.Thread(target=read_stream, args=(process.stderr, error_buffer, win, True))
+        t1.start()
+        t2.start()
+        
+        retcode = process.wait()
+        t1.join()
+        t2.join()
+        
         if retcode == 0: return True, None
-        else: return False, "".join(error_buffer) if error_buffer else "Unknown error (retcode {})".format(retcode)
+        else: return False, "".join(error_buffer) if error_buffer else f"Unknown error (retcode {retcode})"
     except Exception as e: return False, str(e)
 
 def check_system_health(stdscr):
@@ -344,11 +329,11 @@ def fix_permissions(stdscr, paths):
     for path in paths:
         if path and os.path.exists(path):
             if os.path.isdir(path):
-                 run_cmd(["setfacl", "-R", "-m", f"u:{qemu_user}:rx", path], check=False)
+                run_cmd(["setfacl", "-R", "-m", f"u:{qemu_user}:rx", path], check=False)
             else:
-                 run_cmd(["setfacl", "-m", f"u:{qemu_user}:r", path], check=False)
-                 parent = os.path.dirname(path)
-                 run_cmd(["setfacl", "-m", f"u:{qemu_user}:x", parent], check=False)
+                run_cmd(["setfacl", "-m", f"u:{qemu_user}:r", path], check=False)
+                parent = os.path.dirname(path)
+                run_cmd(["setfacl", "-m", f"u:{qemu_user}:x", parent], check=False)
 
 def download_with_progress(stdscr, url, filename):
     try:
@@ -955,11 +940,13 @@ def create_windows_vm(stdscr, name, vm_dir, disk_path, iso, net_args):
         f"--disk=path={disk_path},device=disk,bus=virtio,format=qcow2,boot.order=2",
         f"--disk=path={virtio_iso},device=cdrom,bus=sata,boot.order=3",
         "--os-variant=win10",
-        "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
+        "--graphics", "spice,listen=127.0.0.1", "--video", "vga",
         "--channel", "spicevmc",
+        "--channel", "unix,target.type=virtio,name=org.qemu.guest_agent.0",
         "--cpu", "host-passthrough",
         "--boot", "uefi,menu=on",
         "--features", "smm=on",
+        "--pm", "suspend_to_mem=on,suspend_to_disk=on",
         "--memorybacking", "source.type=memfd,access.mode=shared",
         f"--filesystem", f"source={HOST_SHARE_DIR},target=host_share,driver.type=virtiofs,accessmode=passthrough",
         "--tpm", "backend.type=emulator,backend.version=2.0,model=tpm-tis",
@@ -980,8 +967,9 @@ def create_linux_vm_iso(stdscr, name, vm_dir, disk_path, iso, net_args):
         f"--disk=path={iso},device=cdrom,bus=sata,boot.order=1",
         f"--disk=path={disk_path},device=disk,bus=virtio,format=qcow2,boot.order=2",
         "--os-variant=generic",
-        "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
+        "--graphics", "spice,listen=127.0.0.1", "--video", "vga",
         "--channel", "spicevmc",
+        "--channel", "unix,target.type=virtio,name=org.qemu.guest_agent.0",
         "--cpu", "host-passthrough",
         "--boot", "uefi,menu=on",
         "--memorybacking", "source.type=memfd,access.mode=shared",
@@ -1019,7 +1007,7 @@ def create_linux_vm_cloud(stdscr, name, vm_dir, disk_path, disk_size, img_data, 
     log_path = os.path.join(vm_dir, f"{name}-console.log")
 
     packages_list = [
-        "build-essential", "linux-headers-generic", "bear", "net-tools",
+        "qemu-guest-agent", "build-essential", "linux-headers-generic", "bear", "net-tools",
         "nfs-common", "wpasupplicant", "hostapd", "network-manager",
         "rfkill", "iw", "wireless-tools", "unzip", "vim",
         "libnl-genl-3-dev", "libnl-3-dev", "libnl-route-3-dev",
@@ -1056,6 +1044,40 @@ chpasswd:
   list: |
     ubuntu:password
   expire: False
+write_files:
+  - path: /lib/systemd/system-sleep/virtio-fs-fix
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Automatically find all virtio-fs PCI addresses
+      VFS_PCI_ADDRS=$(ls -d /sys/bus/virtio/drivers/virtiofs/virtio* 2>/dev/null | xargs -I {{}} readlink -f {{}}/.. | xargs -I {{}} basename {{}})
+
+      case $1 in
+        pre)
+          fuser -mk /home/ubuntu/host_share 2>/dev/null
+          umount -f /home/ubuntu/host_share 2>/dev/null
+          
+          for addr in $VFS_PCI_ADDRS; do
+            if [ -n "$addr" ] && [ -e "/sys/bus/pci/devices/$addr/remove" ]; then
+              echo 1 > "/sys/bus/pci/devices/$addr/remove" 2>/dev/null
+            fi
+          done
+          ;;
+        post)
+          echo 1 > /sys/bus/pci/rescan
+          
+          systemd-run --no-block --unit="virtio-fs-remount" /bin/bash -c "
+            for i in {{1..20}}; do
+              if ls -d /sys/bus/virtio/drivers/virtiofs/virtio* >/dev/null 2>&1; then
+                sleep 2
+                mount -a || mount -t virtiofs host_share /home/ubuntu/host_share
+                break
+              fi
+              sleep 2
+            done
+          "
+          ;;
+      esac
 runcmd:
   - rm -f /etc/default/grub.d/50-cloudimg-settings.cfg
   - sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=".*"/GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyS0 console=ttyS1 net.ifnames=0 biosdevname=0"/' /etc/default/grub
@@ -1091,8 +1113,9 @@ power_state:
         f"--disk=path={seed_iso_path},device=cdrom",
         f"--os-variant={img_data['variant']}",
         "--import",
-        "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
+        "--graphics", "spice,listen=127.0.0.1", "--video", "vga",
         "--channel", "spicevmc",
+        "--channel", "unix,target.type=virtio,name=org.qemu.guest_agent.0",
         "--serial", "pty", 
         "--serial", f"file,path={log_path}",
         "--console", "pty,target_type=serial",
@@ -1150,12 +1173,26 @@ def start_vm(stdscr):
         return
     state = run_cmd(f"virsh -c qemu:///system domstate {CURRENT_VM}", shell=True, check=False)
     if not state:
-         msg_box(stdscr, f"VM '{CURRENT_VM}' is not defined in Libvirt.\nCannot start.")
-         return
+        msg_box(stdscr, f"VM '{CURRENT_VM}' is not defined in Libvirt.\nCannot start.")
+        return
     if "running" in state:
         launch_viewer(CURRENT_VM)
         return
-    success, err = run_cmd_live(stdscr, ["virsh", "-c", "qemu:///system", "start", CURRENT_VM], title="Starting...")
+    elif "paused" in state:
+        success, err = run_cmd_live(stdscr, ["virsh", "-c", "qemu:///system", "resume", CURRENT_VM], title="Resuming...")
+    else:
+        success, err = run_cmd_live(stdscr, ["virsh", "-c", "qemu:///system", "start", CURRENT_VM], title="Starting...")
+
+    if not success and err and "apparmor" in err.lower():
+        run_cmd(f"virsh -c qemu:///system dumpxml {CURRENT_VM} > /tmp/vmtui_fix.xml", shell=True)
+        run_cmd("sed -i '/<seclabel type=.dynamic. model=.apparmor./d' /tmp/vmtui_fix.xml", shell=True)
+        run_cmd(f"virsh -c qemu:///system define /tmp/vmtui_fix.xml", shell=True)
+        
+        if "paused" in state:
+            success, err = run_cmd_live(stdscr, ["virsh", "-c", "qemu:///system", "resume", CURRENT_VM], title="Retrying Resume...")
+        else:
+            success, err = run_cmd_live(stdscr, ["virsh", "-c", "qemu:///system", "start", CURRENT_VM], title="Retrying Start...")
+
     if success: launch_viewer(CURRENT_VM)
     else: msg_box(stdscr, f"Error starting VM:\n{err}")
 
@@ -1180,8 +1217,8 @@ def resize_vm_disk(stdscr):
         # Fallback to Registry if VM is off/undefined
         disk_path = os.path.join(get_vm_dir(CURRENT_VM), f"{CURRENT_VM}.qcow2")
         if not os.path.exists(disk_path):
-             msg_box(stdscr, "Could not locate VM disk image.")
-             return
+            msg_box(stdscr, "Could not locate VM disk image.")
+            return
 
     # User Input
     size = input_box(stdscr, "Expand by (e.g. +10G, +50G): ", "+10G")
@@ -1262,11 +1299,13 @@ def restore_vm_from_disk(stdscr, name, path):
             f"--memory={mem}", f"--vcpus={cpus}",
             f"--disk=path={disk_path},device=disk,bus=virtio,format=qcow2,boot.order=1",
             "--os-variant=win10",
-            "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
+            "--graphics", "spice,listen=127.0.0.1", "--video", "vga",
             "--channel", "spicevmc",
+        "--channel", "unix,target.type=virtio,name=org.qemu.guest_agent.0",
             "--cpu", "host-passthrough",
             "--boot", "uefi,menu=on",
             "--features", "smm=on",
+        "--pm", "suspend_to_mem=on,suspend_to_disk=on",
             "--memorybacking", "source.type=memfd,access.mode=shared",
             f"--filesystem", f"source={HOST_SHARE_DIR},target=host_share,driver.type=virtiofs,accessmode=passthrough",
             "--tpm", "backend.type=emulator,backend.version=2.0,model=tpm-tis",
@@ -1274,7 +1313,7 @@ def restore_vm_from_disk(stdscr, name, path):
         ]
         # Attach VirtIO ISO if exists, just in case drivers are needed
         if os.path.exists(virtio_iso):
-             cmd.insert(8, f"--disk=path={virtio_iso},device=cdrom,bus=sata,boot.order=2")
+            cmd.insert(8, f"--disk=path={virtio_iso},device=cdrom,bus=sata,boot.order=2")
              
     else: # Linux
         cmd = [
@@ -1284,8 +1323,9 @@ def restore_vm_from_disk(stdscr, name, path):
             "--memorybacking", "source.type=memfd,access.mode=shared",
             f"--disk=path={disk_path},device=disk,bus=virtio",
             "--os-variant=generic",
-            "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
+            "--graphics", "spice,listen=127.0.0.1", "--video", "vga",
             "--channel", "spicevmc",
+        "--channel", "unix,target.type=virtio,name=org.qemu.guest_agent.0",
             "--console", "pty,target_type=serial",
             f"--filesystem", f"source={HOST_SHARE_DIR},target=host_share,driver.type=virtiofs,accessmode=passthrough",
             "--cpu", "host-passthrough",
@@ -1329,7 +1369,7 @@ def switch_vm_menu(stdscr):
                 default_idx = i
                 break
     elif CURRENT_VM in vms:
-         default_idx = vms.index(CURRENT_VM)
+        default_idx = vms.index(CURRENT_VM)
 
     idx = selection_menu(stdscr, "Select Active VM", menu_items, default_row=default_idx)
     if idx != -1 and idx < len(vms):
@@ -1477,14 +1517,16 @@ def main(stdscr):
             "6. Start / Restore (from Disk)",
             "7. Viewer (Graphical Access)",
             "8. USB Manager",
-            "9. Hibernate (Save to Disk)",
-            "A. Pause (Freeze in RAM)",
-            "B. Resume (Unfreeze RAM)",
-            "C. Force Stop VM",
-            "D. Delete Active VM",
-            "E. Import / Rescue VM Directory",
-            "F. Resize Active VM Disk",
-            "G. VM Individual Settings (Per-VM Config)",
+            "9. Hibernate (Host - ManagedSave)",
+            "A. Guest Suspend (RAM/S3) [Requires GA]",
+            "B. Guest Hibernate (Disk/S4) [Requires GA]",
+            "C. Host Pause (Freeze in RAM)",
+            "D. Resume / Wakeup",
+            "E. Force Stop VM",
+            "F. Delete Active VM",
+            "G. Import / Rescue VM Directory",
+            "H. Resize Active VM Disk",
+            "I. VM Individual Settings (Per-VM Config)",
             "Q. Quit"
         ]
         
@@ -1501,16 +1543,43 @@ def main(stdscr):
         elif idx == 6: launch_viewer(CURRENT_VM)
         elif idx == 7: usb_menu_logic(stdscr)
         elif idx == 8:
-             msg_box(stdscr, "Hibernating...")
-             run_cmd(["virsh", "-c", "qemu:///system", "managedsave", CURRENT_VM], check=False)
-        elif idx == 9: run_cmd(["virsh", "-c", "qemu:///system", "suspend", CURRENT_VM], check=False)
-        elif idx == 10: run_cmd(["virsh", "-c", "qemu:///system", "resume", CURRENT_VM], check=False)
-        elif idx == 11: run_cmd(["virsh", "-c", "qemu:///system", "destroy", CURRENT_VM], check=False)
-        elif idx == 12: delete_vm(stdscr)
-        elif idx == 13: import_vm_logic(stdscr)
-        elif idx == 14: resize_vm_disk(stdscr)
-        elif idx == 15: edit_vm_settings(stdscr)
-        elif idx == 16 or idx == -1: break
+            msg_box(stdscr, "Host Hibernating (ManagedSave)...")
+            run_cmd(["virsh", "-c", "qemu:///system", "managedsave", CURRENT_VM], check=False)
+        elif idx == 9:
+            msg_box(stdscr, "Sending S3 Suspend signal to Guest...")
+            run_cmd(["virsh", "-c", "qemu:///system", "dompmsuspend", CURRENT_VM, "mem"], check=False)
+        elif idx == 10:
+            msg_box(stdscr, "Sending S4 Hibernate signal to Guest...")
+            run_cmd(["virsh", "-c", "qemu:///system", "dompmsuspend", CURRENT_VM, "disk"], check=False)
+        elif idx == 11:
+            msg_box(stdscr, "Host Pausing VM...")
+            run_cmd(["virsh", "-c", "qemu:///system", "suspend", CURRENT_VM], check=False)
+        elif idx == 12:
+            # Intelligent Resume/Wakeup logic
+            try:
+                state_raw = run_cmd(f"virsh -c qemu:///system domstate {CURRENT_VM}", shell=True, check=False)
+                state = str(state_raw).lower().strip()
+                
+                if "pmsuspended" in state:
+                    msg_box(stdscr, "Waking up Guest (S3/S4 Wakeup)...")
+                    run_cmd(["virsh", "-c", "qemu:///system", "dompmwakeup", CURRENT_VM], check=False)
+                elif "paused" in state:
+                    msg_box(stdscr, "Resuming Host-Paused VM...")
+                    run_cmd(["virsh", "-c", "qemu:///system", "resume", CURRENT_VM], check=False)
+                elif "shut off" in state:
+                    msg_box(stdscr, "Starting VM (Booting/S4 Restore)...")
+                    run_cmd(["virsh", "-c", "qemu:///system", "start", CURRENT_VM], check=False)
+                else:
+                    msg_box(stdscr, f"VM is currently: {state_raw}\nAttempting normal resume...")
+                    run_cmd(["virsh", "-c", "qemu:///system", "resume", CURRENT_VM], check=False)
+            except Exception as e:
+                msg_box(stdscr, f"Error during resume:\n{str(e)}")
+        elif idx == 13: run_cmd(["virsh", "-c", "qemu:///system", "destroy", CURRENT_VM], check=False)
+        elif idx == 14: delete_vm(stdscr)
+        elif idx == 15: import_vm_logic(stdscr)
+        elif idx == 16: resize_vm_disk(stdscr)
+        elif idx == 17: edit_vm_settings(stdscr)
+        elif idx == 18 or idx == -1: break
 
 if __name__ == "__main__":
     if os.geteuid() != 0:
