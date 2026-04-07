@@ -29,6 +29,7 @@ import urllib.request
 import urllib.error
 import pwd
 import grp
+import base64
 
 import logging
 
@@ -751,6 +752,39 @@ def cdrom_menu_logic(stdscr):
 
 # --- Logic: Host Setup ---
 
+def configure_nss_libvirt(stdscr):
+    content = run_cmd("cat /etc/nsswitch.conf", shell=True, check=False)
+    if not content:
+        return False, "Could not read /etc/nsswitch.conf"
+    
+    lines = content.split('\n')
+    new_lines = []
+    changed = False
+    for line in lines:
+        if line.startswith('hosts:') and 'libvirt' not in line:
+            # Insert libvirt before dns or append if dns not found
+            if 'dns' in line:
+                # Use regex to replace 'dns' with 'libvirt dns' to handle spacing
+                new_line = re.sub(r'(\b)dns(\b)', r'\1libvirt dns\2', line)
+            else:
+                new_line = line.rstrip() + ' libvirt'
+            new_lines.append(new_line)
+            changed = True
+        else:
+            new_lines.append(line)
+    
+    if changed:
+        new_content = '\n'.join(new_lines)
+        tmp_file = "/tmp/nsswitch.conf.tmp"
+        try:
+            with open(tmp_file, "w") as f:
+                f.write(new_content)
+            run_cmd(f"cp {tmp_file} /etc/nsswitch.conf", shell=True)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+    return True, None
+
 def change_host_share_path(stdscr):
     global HOST_SHARE_DIR
     new_path = directory_browser(stdscr, HOST_SHARE_DIR, "Select Host Share Directory")
@@ -779,7 +813,8 @@ def setup_host(stdscr):
             pkgs = [
                 "qemu-system-x86", "libvirt-daemon-system", "libvirt-clients", "virtinst", 
                 "virt-viewer", "swtpm", "swtpm-tools", "acl", "ovmf", 
-                "cloud-image-utils", "unzip", "wireless-tools", "bridge-utils"
+                "cloud-image-utils", "unzip", "wireless-tools", "bridge-utils",
+                "libnss-libvirt"
             ]
             
             # On newer Ubuntu (24.04+), virtiofsd is a separate package
@@ -799,10 +834,19 @@ def setup_host(stdscr):
                 msg_box(stdscr, f"Package installation failed:\n{err}")
                 continue
 
+            # Configure libvirt in nsswitch.conf
+            nss_success, nss_err = configure_nss_libvirt(stdscr)
+            if not nss_success:
+                msg_box(stdscr, f"Warning: Could not configure /etc/nsswitch.conf:\n{nss_err}")
+
             check_system_health(stdscr)
             if SUDO_USER:
                 run_cmd(f"usermod -aG libvirt,kvm {SUDO_USER}", shell=True, check=False)
-            msg_box(stdscr, "Host Setup Complete.\nPlease reboot if you just installed these for the first time.")
+                # Apply ACL permissions for current directory
+                run_cmd(f"setfacl -R -m u:{SUDO_USER}:rwX .", shell=True, check=False)
+                run_cmd(f"setfacl -d -m u:{SUDO_USER}:rwX .", shell=True, check=False)
+                
+            msg_box(stdscr, f"Host Setup Complete.\n\nPermissions & ACLs applied for user: {SUDO_USER if SUDO_USER else 'root'}\n\nIMPORTANT: Please logout and login again (or reboot) for group membership (libvirt/kvm) to take full effect in your terminal session.")
         elif choice == 1:
             change_host_share_path(stdscr)
         else:
@@ -1245,6 +1289,115 @@ def delete_vm(stdscr):
         save_registry()
     msg_box(stdscr, f"VM '{CURRENT_VM}' deleted.")
 
+def duplicate_vm(stdscr):
+    if not CURRENT_VM:
+        msg_box(stdscr, "No Active VM selected to duplicate.")
+        return
+
+    src_vm = CURRENT_VM
+    dst_vm = input_box(stdscr, f"Clone '{src_vm}' as New VM Name: ", f"{src_vm}-clone")
+    if not dst_vm or dst_vm == src_vm: 
+        return
+
+    # Check if target VM already exists
+    dom_info = run_cmd(f"virsh -c qemu:///system dominfo {dst_vm}", shell=True, check=False)
+    if dom_info and "Id:" in dom_info:
+        msg_box(stdscr, f"Error: VM '{dst_vm}' already exists in Libvirt.")
+        return
+
+    # Suspend source VM to ensure data consistency during clone
+    state = run_cmd(f"virsh -c qemu:///system domstate {src_vm}", shell=True, check=False)
+    was_running = False
+    if state and "running" in state:
+        if selection_menu(stdscr, f"'{src_vm}' is running. Suspend it during clone?", ["Cancel", "Suspend & Clone"]) == 1:
+            run_cmd_live(stdscr, ["virsh", "-c", "qemu:///system", "suspend", src_vm], title="Suspending source VM...")
+            was_running = True
+        else:
+            return
+
+    # Prepare directories
+    entry = VM_REGISTRY.get(src_vm)
+    src_dir = entry.get("dir") if isinstance(entry, dict) else DEFAULT_LINUX_DIR
+    base_dir = os.path.dirname(src_dir) if src_dir and os.path.exists(src_dir) else DEFAULT_LINUX_DIR
+    
+    dst_dir = os.path.join(base_dir, dst_vm)
+    os.makedirs(dst_dir, exist_ok=True)
+    if SUDO_USER: 
+        run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {dst_dir}", shell=True)
+    
+    dst_disk = os.path.join(dst_dir, f"{dst_vm}.qcow2")
+
+    # 1. Execute virt-clone
+    success, err = run_cmd_live(stdscr, ["virt-clone", "--original", src_vm, "--name", dst_vm, "--file", dst_disk], title=f"Cloning Disk to {dst_vm}...")
+    
+    # Resume source VM if it was suspended
+    if was_running:
+        run_cmd(["virsh", "-c", "qemu:///system", "resume", src_vm], check=False)
+
+    if not success:
+        msg_box(stdscr, f"Clone failed:\n{err}")
+        return
+
+    # 2. Isolate host_share directory
+    new_share = os.path.join(USER_HOME, f"driver_projects_{dst_vm}")
+    os.makedirs(new_share, exist_ok=True)
+    if SUDO_USER: 
+        run_cmd(f"chown {SUDO_USER}:{SUDO_USER} {new_share}", shell=True)
+    
+    update_vm_virtiofs_path(stdscr, dst_vm, new_share)
+    
+    # Register the new VM
+    VM_REGISTRY[dst_vm] = {"dir": dst_dir, "host_share": new_share, "installing": False}
+    save_registry()
+
+    # 3. Guest Agent Injection for Linux Auto-Fix
+    if selection_menu(stdscr, f"Clone Complete! Run Guest Agent Auto-Fix (Linux only)?\nThis will reset IP, Hostname, and Machine-ID.", ["No", "Yes (Start VM & Fix)"]) == 1:
+        run_cmd_live(stdscr, ["virsh", "-c", "qemu:///system", "start", dst_vm], title="Starting cloned VM...")
+        
+        # Wait for QEMU Guest Agent to become responsive
+        msg_box(stdscr, "Waiting for VM to boot and Guest Agent to start...\nPlease wait up to 30 seconds.")
+        ready = False
+        for _ in range(15):
+            res = run_cmd(f"virsh -c qemu:///system qemu-agent-command {dst_vm} '{{\"execute\":\"guest-ping\"}}'", shell=True, check=False)
+            if res and "return" in res:
+                ready = True
+                break
+            time.sleep(2)
+            
+        if ready:
+            # Shell script to fix Linux identity issues
+            fix_script = f"""
+hostnamectl set-hostname {dst_vm}
+sed -i 's/{src_vm}/{dst_vm}/g' /etc/hosts
+rm -f /etc/machine-id /var/lib/dbus/machine-id
+systemd-machine-id-setup
+ln -sf /etc/machine-id /var/lib/dbus/machine-id
+sed -i '/match:/d' /etc/netplan/*.yaml 2>/dev/null
+sed -i '/macaddress:/d' /etc/netplan/*.yaml 2>/dev/null
+netplan apply
+"""
+            # Encode script to avoid escaping issues in JSON
+            encoded_script = base64.b64encode(fix_script.encode('utf-8')).decode('utf-8')
+            
+            cmd_args = {
+                "execute": "guest-exec",
+                "arguments": {
+                    "path": "/bin/bash",
+                    "arg": ["-c", f"echo {encoded_script} | base64 -d | bash"],
+                    "capture-output": True
+                }
+            }
+            # Inject script
+            run_cmd(["virsh", "-c", "qemu:///system", "qemu-agent-command", dst_vm, json.dumps(cmd_args)], check=False)
+            
+            # Reboot to apply machine-id changes
+            reboot_args = {"execute":"guest-exec", "arguments":{"path":"/sbin/reboot"}}
+            run_cmd(["virsh", "-c", "qemu:///system", "qemu-agent-command", dst_vm, json.dumps(reboot_args)], check=False)
+            
+            msg_box(stdscr, f"Auto-Fix applied successfully!\nVM '{dst_vm}' is rebooting with its new identity.")
+        else:
+            msg_box(stdscr, "Guest Agent timeout.\nThe VM took too long to boot or QGA is not installed.\nYou will need to fix Hostname/IP manually.")
+
 def import_vm_logic(stdscr):
     global CURRENT_VM, VM_REGISTRY
     path = directory_browser(stdscr, os.getcwd(), "Select Existing VM Directory")
@@ -1511,22 +1664,23 @@ def main(stdscr):
         menu_opts = [
             "1. Setup Host Environment",
             "2. Create New VM (Linux / Windows)",
-            "3. Switch Active VM",
-            "4. Console (Text Access) [Linux Only]",
-            "5. Tail Install / Boot Log [Linux Only]",
-            "6. Start / Restore (from Disk)",
-            "7. Viewer (Graphical Access)",
-            "8. USB Manager",
-            "9. Hibernate (Host - ManagedSave)",
-            "A. Guest Suspend (RAM/S3) [Requires GA]",
-            "B. Guest Hibernate (Disk/S4) [Requires GA]",
-            "C. Host Pause (Freeze in RAM)",
-            "D. Resume / Wakeup",
-            "E. Force Stop VM",
-            "F. Delete Active VM",
-            "G. Import / Rescue VM Directory",
-            "H. Resize Active VM Disk",
-            "I. VM Individual Settings (Per-VM Config)",
+            "3. Duplicate Active VM (Clone & Auto-Fix)",
+            "4. Switch Active VM",
+            "5. Console (Text Access) [Linux Only]",
+            "6. Tail Install / Boot Log [Linux Only]",
+            "7. Start / Restore (from Disk)",
+            "8. Viewer (Graphical Access)",
+            "9. USB Manager",
+            "A. Hibernate (Host - ManagedSave)",
+            "B. Guest Suspend (RAM/S3) [Requires GA]",
+            "C. Guest Hibernate (Disk/S4) [Requires GA]",
+            "D. Host Pause (Freeze in RAM)",
+            "E. Resume / Wakeup",
+            "F. Force Stop VM",
+            "G. Delete Active VM",
+            "H. Import / Rescue VM Directory",
+            "I. Resize Active VM Disk",
+            "J. VM Individual Settings (Per-VM Config)",
             "Q. Quit"
         ]
         
@@ -1534,27 +1688,28 @@ def main(stdscr):
         
         if idx == 0: setup_host(stdscr)
         elif idx == 1: create_vm_wizard(stdscr)
-        elif idx == 2: switch_vm_menu(stdscr)
-        elif idx == 3:
+        elif idx == 2: duplicate_vm(stdscr)
+        elif idx == 3: switch_vm_menu(stdscr)
+        elif idx == 4:
             curses.endwin()
             os.system(f"virsh -c qemu:///system console {CURRENT_VM}")
-        elif idx == 4: tail_vm_log(stdscr)
-        elif idx == 5: start_vm(stdscr)
-        elif idx == 6: launch_viewer(CURRENT_VM)
-        elif idx == 7: usb_menu_logic(stdscr)
-        elif idx == 8:
+        elif idx == 5: tail_vm_log(stdscr)
+        elif idx == 6: start_vm(stdscr)
+        elif idx == 7: launch_viewer(CURRENT_VM)
+        elif idx == 8: usb_menu_logic(stdscr)
+        elif idx == 9:
             msg_box(stdscr, "Host Hibernating (ManagedSave)...")
             run_cmd(["virsh", "-c", "qemu:///system", "managedsave", CURRENT_VM], check=False)
-        elif idx == 9:
+        elif idx == 10:
             msg_box(stdscr, "Sending S3 Suspend signal to Guest...")
             run_cmd(["virsh", "-c", "qemu:///system", "dompmsuspend", CURRENT_VM, "mem"], check=False)
-        elif idx == 10:
+        elif idx == 11:
             msg_box(stdscr, "Sending S4 Hibernate signal to Guest...")
             run_cmd(["virsh", "-c", "qemu:///system", "dompmsuspend", CURRENT_VM, "disk"], check=False)
-        elif idx == 11:
+        elif idx == 12:
             msg_box(stdscr, "Host Pausing VM...")
             run_cmd(["virsh", "-c", "qemu:///system", "suspend", CURRENT_VM], check=False)
-        elif idx == 12:
+        elif idx == 13:
             # Intelligent Resume/Wakeup logic
             try:
                 state_raw = run_cmd(f"virsh -c qemu:///system domstate {CURRENT_VM}", shell=True, check=False)
@@ -1574,12 +1729,12 @@ def main(stdscr):
                     run_cmd(["virsh", "-c", "qemu:///system", "resume", CURRENT_VM], check=False)
             except Exception as e:
                 msg_box(stdscr, f"Error during resume:\n{str(e)}")
-        elif idx == 13: run_cmd(["virsh", "-c", "qemu:///system", "destroy", CURRENT_VM], check=False)
-        elif idx == 14: delete_vm(stdscr)
-        elif idx == 15: import_vm_logic(stdscr)
-        elif idx == 16: resize_vm_disk(stdscr)
-        elif idx == 17: edit_vm_settings(stdscr)
-        elif idx == 18 or idx == -1: break
+        elif idx == 14: run_cmd(["virsh", "-c", "qemu:///system", "destroy", CURRENT_VM], check=False)
+        elif idx == 15: delete_vm(stdscr)
+        elif idx == 16: import_vm_logic(stdscr)
+        elif idx == 17: resize_vm_disk(stdscr)
+        elif idx == 18: edit_vm_settings(stdscr)
+        elif idx == 19 or idx == -1: break
 
 if __name__ == "__main__":
     if os.geteuid() != 0:
