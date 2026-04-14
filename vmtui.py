@@ -278,28 +278,42 @@ def run_cmd_live(stdscr, cmd, title="Executing..."):
             cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
         )
         
-        def read_stream(stream, buffer, window, is_err=False):
+        import queue
+        q = queue.Queue()
+
+        def read_stream(stream, is_err=False):
             for line in iter(stream.readline, ''):
                 if line:
-                    buffer.append(line)
-                    if window:
-                        try:
-                            if is_err:
-                                window.addstr(line, curses.color_pair(3))
-                            else:
-                                window.addstr(line)
-                            window.refresh()
-                        except curses.error:
-                            pass
-        
-        t1 = threading.Thread(target=read_stream, args=(process.stdout, output_buffer, win))
-        t2 = threading.Thread(target=read_stream, args=(process.stderr, error_buffer, win, True))
+                    q.put((is_err, line))
+
+        t1 = threading.Thread(target=read_stream, args=(process.stdout, False))
+        t2 = threading.Thread(target=read_stream, args=(process.stderr, True))
         t1.start()
         t2.start()
-        
-        retcode = process.wait()
+
+        while process.poll() is None or not q.empty():
+            try:
+                is_err, line = q.get(timeout=0.1)
+                if not is_err:
+                    output_buffer.append(line)
+                else:
+                    error_buffer.append(line)
+                
+                if win:
+                    try:
+                        if is_err:
+                            win.addstr(line, curses.color_pair(3))
+                        else:
+                            win.addstr(line)
+                        win.refresh()
+                    except curses.error:
+                        pass
+            except queue.Empty:
+                pass
+
         t1.join()
         t2.join()
+        retcode = process.returncode
         
         if retcode == 0: return True, None
         else: return False, "".join(error_buffer) if error_buffer else f"Unknown error (retcode {retcode})"
