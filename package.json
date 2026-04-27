@@ -1,0 +1,43 @@
+{
+  "name": "vmtui",
+  "version": "1.0.0",
+  "description": "**VMTUI** is a unified Python TUI (Text User Interface) tool designed for Linux developers to easily create and manage KVM virtual machines.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node dist/App.js",
+    "build": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bluemot/vmtui.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/bluemot/vmtui/issues"
+  },
+  "homepage": "https://github.com/bluemot/vmtui#readme",
+  "dependencies": {
+    "@types/blessed": "^0.1.27",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "axios": "^1.15.2",
+    "blessed": "^0.1.81",
+    "ink": "^7.0.1",
+    "ink-select-input": "^6.2.0",
+    "ink-text-input": "^6.0.0",
+    "lucide-react": "^1.11.0",
+    "react": "^19.2.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3",
+    "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "@types/react-is": "^19.2.0",
+    "ink-testing-library": "^4.0.0",
+    "react-is": "^19.2.5"
+  }
+}

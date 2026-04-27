@@ -1,10 +1,8 @@
-__pycache__/
-*.pyc
-*.qcow2
-*.img
-*.iso
-*.log
-vms/
-win_vms/
+node_modules/
+dist/
+.sudo_pass
+vmtui.log
 vms.json
 vmtui.json
+/tmp/vmtui*
+*.js.map
