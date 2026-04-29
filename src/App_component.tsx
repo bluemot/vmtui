@@ -255,38 +255,51 @@ const UsbManager = ({ vmName, onBack }: { vmName: string, onBack: () => void }) 
 };
 
 export const App = () => {
-	const { exit } = useApp();
-	const [activeVm, setActiveVm] = useState<string>('');
-	const [vmState, setVmState] = useState<string>('Stopped');
-	const [view, setView] = useState<'main' | 'setup' | 'browser' | 'create' | 'usb'>('main');
-	const [message, setMessage] = useState<string>('');    const [browserMode, setBrowserMode] = useState<'file' | 'directory'>('directory');
+    const { exit } = useApp();
+    const [activeVm, setActiveVm] = useState<string>('');
+    const [vmState, setVmState] = useState<string>('Stopped');
+    const [view, setView] = useState<'main' | 'setup' | 'browser' | 'create' | 'usb'>('main');
+    const [message, setMessage] = useState<string>('');
+    const [browserMode, setBrowserMode] = useState<'file' | 'directory'>('directory');
     const [browserTitle, setBrowserTitle] = useState<string>('Select Directory');
     const [browserStartPath, setBrowserStartPath] = useState<string>(config.USER_HOME);
     const [onBrowserSelect, setOnBrowserSelect] = useState<(path: string | null) => void>(() => {});
 
-    useInput((input) => {
+    const refreshData = async () => {
+        config.loadConfig();
+        const states = await system.getVmStates();
+        if (activeVm) {
+            setVmState(states[activeVm] || 'Stopped');
+        }
+        setMessage('Data refreshed.');
+    };
+
+    useInput((input, key) => {
         if (input === 'q' || input === 'Q') {
             if (view === 'main') exit();
         }
+        if (input === 'r' || input === 'R') {
+            refreshData();
+        }
     });
 
-	useEffect(() => {
-		config.loadConfig();
-		const timer = setInterval(async () => {
-			const states = await system.getVmStates();
-			if (activeVm) {
-				setVmState(states[activeVm] || 'Stopped');
-			}
-		}, 5000);
+    useEffect(() => {
+        refreshData();
+        const timer = setInterval(async () => {
+            const states = await system.getVmStates();
+            if (activeVm) {
+                setVmState(states[activeVm] || 'Stopped');
+            }
+        }, 5000);
 
-		return () => clearInterval(timer);
-	}, [activeVm]);
+        return () => clearInterval(timer);
+    }, [activeVm]);
 
-	const handleSelect = async (value: string) => {
-		if (value === 'quit') {
-			exit();
-			return;
-		}
+    const handleSelect = async (value: string) => {
+        if (value === 'quit') {
+            exit();
+            return;
+        }
 
         setMessage(''); // Clear previous message
 
@@ -431,7 +444,7 @@ export const App = () => {
         } catch (e: any) {
             setMessage(`Error: ${e.message}`);
         }
-	};
+    };
 
     const handleSetupSelect = async (item: any) => {
         if (item.value === 'back') {
@@ -505,19 +518,19 @@ export const App = () => {
         }
     };
 
-	return (
-		<Box flexDirection="column" padding={1}>
-			<Box borderStyle="round" borderColor="blue" paddingX={1} marginBottom={1}>
-				<Text bold> VMTUI (Ink) </Text>
+    return (
+        <Box flexDirection="column" padding={1}>
+            <Box borderStyle="round" borderColor="blue" paddingX={1} marginBottom={1}>
+                <Text bold> VMTUI (Ink) </Text>
                 <Box marginLeft={2}>
-				    <Text>Active VM: </Text>
-				    <Text color="green">{activeVm || 'None'}</Text>
+                    <Text>Active VM: </Text>
+                    <Text color="green">{activeVm || 'None'}</Text>
                 </Box>
                 <Box marginLeft={2}>
-				    <Text>Status: </Text>
-				    <Text color="yellow">[{vmState}]</Text>
+                    <Text>Status: </Text>
+                    <Text color="yellow">[{vmState}]</Text>
                 </Box>
-			</Box>
+            </Box>
 
             {view === 'main' && <MainMenu key="main" onSelect={handleSelect} activeVm={activeVm} />}
             
@@ -542,24 +555,11 @@ export const App = () => {
                 </Box>
             )}
 
-			<Box marginTop={1}>
-				<Text dimColor>Press Q to quit</Text>
-			</Box>
-		</Box>
-	);
-};
-
-export default App;
-     <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="yellow">
-                    <Text>{message}</Text>
-                </Box>
-            )}
-
-			<Box marginTop={1}>
-				<Text dimColor>Press Q to quit</Text>
-			</Box>
-		</Box>
-	);
+            <Box marginTop={1}>
+                <Text dimColor>Press Q to quit</Text>
+            </Box>
+        </Box>
+    );
 };
 
 export default App;
