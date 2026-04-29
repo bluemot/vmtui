@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Text, Box, useApp } from 'ink';
+import { Text, Box, useApp, useInput } from 'ink';
 import SelectInput from 'ink-select-input';
 import TextInput from 'ink-text-input';
 import * as fs from 'fs/promises';
@@ -8,36 +8,127 @@ import * as config from './config.js';
 import * as system from './system.js';
 import { FileBrowser } from './FileBrowser.js';
 
-const MainMenu = ({ onSelect }: { onSelect: (item: any) => void }) => {
-	const items = [
-		{ label: '1. Setup Host Environment', value: 'setup' },
-		{ label: '2. Create New VM (Linux / Windows)', value: 'create' },
-		{ label: '3. Duplicate Active VM (Clone & Auto-Fix)', value: 'duplicate' },
-		{ label: '4. Switch Active VM', value: 'switch' },
-		{ label: '5. Console (Text Access) [Linux Only]', value: 'console' },
-		{ label: '6. Tail Install / Boot Log [Linux Only]', value: 'tail' },
-		{ label: '7. Start / Restore (from Disk)', value: 'start' },
-		{ label: '8. Viewer (Graphical Access)', value: 'viewer' },
-		{ label: '9. USB Manager', value: 'usb' },
-		{ label: 'A. Hibernate (Host - ManagedSave)', value: 'hibernate' },
-		{ label: 'B. Guest Suspend (RAM/S3)', value: 'suspend' },
-		{ label: 'C. Guest Hibernate (Disk/S4)', value: 'ghibernate' },
-		{ label: 'D. Host Pause (Freeze in RAM)', value: 'pause' },
-		{ label: 'E. Resume / Wakeup', value: 'resume' },
-		{ label: 'F. Force Stop VM', value: 'stop' },
-		{ label: 'G. Delete Active VM', value: 'delete' },
-		{ label: 'H. Import / Rescue VM Directory', value: 'import' },
-		{ label: 'I. Resize Active VM Disk', value: 'resize' },
-		{ label: 'J. VM Individual Settings', value: 'settings' },
-		{ label: 'Q. Quit', value: 'quit' }
-	];
+const MainMenu = ({ onSelect, activeVm }: { onSelect: (value: string) => void, activeVm: string }) => {
+    const [focusArea, setFocusArea] = useState<'categories' | 'items'>('categories');
+    const [activeCategory, setActiveCategory] = useState('manage');
 
-	return (
-		<Box flexDirection="column">
-			<Text bold color="blue">Main Menu</Text>
-			<SelectInput items={items} onSelect={onSelect} />
-		</Box>
-	);
+    const categories = [
+        { label: ' 🛠  VM Manage    ', value: 'manage' },
+        { label: ' ⚡  Power/Pause  ', value: 'power' },
+        { label: ' 👁  View/Logs    ', value: 'view' },
+        { label: ' 🔄  Switch VM   ', value: 'switch' },
+        { label: ' 🚪  Quit        ', value: 'quit' }
+    ];
+
+    const vmItems = Object.keys(config.VM_REGISTRY).map(name => ({
+        label: name === activeVm ? `● ${name} (Active)` : `○ ${name}`,
+        value: `select-vm:${name}`
+    }));
+
+    const subItems: Record<string, { label: string, value: string }[]> = {
+        manage: [
+            { label: '1. Setup Host Environment', value: 'setup' },
+            { label: '2. Create New VM', value: 'create' },
+            { label: '3. Duplicate Active VM', value: 'duplicate' },
+            { label: '4. Import / Rescue VM', value: 'import' },
+            { label: '5. Resize VM Disk', value: 'resize' },
+            { label: '6. VM Individual Settings', value: 'settings' },
+            { label: '7. USB Manager', value: 'usb' },
+            { label: '8. Delete Active VM', value: 'delete' },
+        ],
+        power: [
+            { label: '1. Start / Restore', value: 'start' },
+            { label: '2. Force Stop VM', value: 'stop' },
+            { label: '3. Hibernate (ManagedSave)', value: 'hibernate' },
+            { label: '4. Guest Suspend (RAM/S3)', value: 'suspend' },
+            { label: '5. Guest Hibernate (Disk/S4)', value: 'ghibernate' },
+            { label: '6. Host Pause (Freeze)', value: 'pause' },
+            { label: '7. Resume / Wakeup', value: 'resume' },
+        ],
+        view: [
+            { label: '1. Console (Text Access)', value: 'console' },
+            { label: '2. Tail Install/Boot Log', value: 'tail' },
+            { label: '3. Viewer (Graphical)', value: 'viewer' },
+        ],
+        switch: vmItems.length > 0 ? vmItems : [{ label: 'No VMs found', value: 'noop' }],
+        quit: [
+            { label: 'Confirm Exit', value: 'quit' }
+        ]
+    };
+
+    const handleCategoryHighlight = (item: any) => {
+        setActiveCategory(item.value);
+    };
+
+    const handleCategorySelect = (item: any) => {
+        if (item.value === 'quit') {
+            onSelect('quit');
+        } else {
+            setFocusArea('items');
+        }
+    };
+
+    useInput((input, key) => {
+        if (focusArea === 'categories' && key.rightArrow) {
+            if (activeCategory !== 'quit') {
+                setFocusArea('items');
+            }
+        }
+        if (focusArea === 'items' && (key.leftArrow || key.escape || key.backspace)) {
+            setFocusArea('categories');
+        }
+    });
+
+    return (
+        <Box flexDirection="column">
+            <Text bold color="blue">Main Menu</Text>
+            <Box flexDirection="row" marginTop={1}>
+                {/* Left Column: Categories */}
+                <Box flexDirection="column" borderStyle="round" borderColor={focusArea === 'categories' ? 'blue' : 'gray'} paddingX={1} width={25}>
+                    <SelectInput 
+                        items={categories} 
+                        onSelect={handleCategorySelect}
+                        onHighlight={handleCategoryHighlight}
+                        isFocused={focusArea === 'categories'}
+                    />
+                </Box>
+
+                {/* Right Column: Sub-items */}
+                <Box 
+                    flexDirection="column" 
+                    borderStyle="round" 
+                    borderColor={focusArea === 'items' ? 'green' : 'gray'} 
+                    paddingX={1} 
+                    marginLeft={1}
+                    flexGrow={1}
+                >
+                    <Box marginBottom={1}>
+                        <Text italic color="cyan">
+                            {categories.find(c => c.value === activeCategory)?.label.trim()} options:
+                        </Text>
+                    </Box>
+                    <SelectInput 
+                        items={subItems[activeCategory] || []} 
+                        onSelect={(item) => {
+                            if (item.value === 'back') setFocusArea('categories');
+                            else onSelect(item.value);
+                        }}
+                        isFocused={focusArea === 'items'}
+                    />
+                    {focusArea === 'items' && (
+                        <Box marginTop={1}>
+                            <Text dimColor>← Left / Esc to back</Text>
+                        </Box>
+                    )}
+                    {focusArea === 'categories' && activeCategory !== 'quit' && (
+                        <Box marginTop={1}>
+                            <Text dimColor>→ Right to open</Text>
+                        </Box>
+                    )}
+                </Box>
+            </Box>
+        </Box>
+    );
 };
 
 const SetupMenu = ({ onSelect }: { onSelect: (item: any) => void }) => {
@@ -167,12 +258,17 @@ export const App = () => {
 	const { exit } = useApp();
 	const [activeVm, setActiveVm] = useState<string>('');
 	const [vmState, setVmState] = useState<string>('Stopped');
-    const [view, setView] = useState<'main' | 'setup' | 'switch' | 'browser' | 'create' | 'usb'>('main');
-    const [message, setMessage] = useState<string>('');
-    const [browserMode, setBrowserMode] = useState<'file' | 'directory'>('directory');
+	const [view, setView] = useState<'main' | 'setup' | 'browser' | 'create' | 'usb'>('main');
+	const [message, setMessage] = useState<string>('');    const [browserMode, setBrowserMode] = useState<'file' | 'directory'>('directory');
     const [browserTitle, setBrowserTitle] = useState<string>('Select Directory');
     const [browserStartPath, setBrowserStartPath] = useState<string>(config.USER_HOME);
     const [onBrowserSelect, setOnBrowserSelect] = useState<(path: string | null) => void>(() => {});
+
+    useInput((input) => {
+        if (input === 'q' || input === 'Q') {
+            if (view === 'main') exit();
+        }
+    });
 
 	useEffect(() => {
 		config.loadConfig();
@@ -186,36 +282,45 @@ export const App = () => {
 		return () => clearInterval(timer);
 	}, [activeVm]);
 
-	const handleSelect = async (item: any) => {
-		if (item.value === 'quit') {
+	const handleSelect = async (value: string) => {
+		if (value === 'quit') {
 			exit();
 			return;
 		}
 
         setMessage(''); // Clear previous message
 
-        if (item.value === 'switch') {
-            setView('switch');
+        if (value.startsWith('select-vm:')) {
+            const vmName = value.split(':')[1];
+            if (vmName) {
+                setActiveVm(vmName);
+                setMessage(`Selected VM: ${vmName}`);
+            }
             return;
         }
 
-        if (item.value === 'setup') {
+        if (value === 'switch') {
+            // Focus is now handled by the sub-menu items
+            return;
+        }
+
+        if (value === 'setup') {
             setView('setup');
             return;
         }
 
-        if (item.value === 'create') {
+        if (value === 'create') {
             setView('create');
             return;
         }
 
-        if (!activeVm && !['setup', 'create', 'import', 'switch'].includes(item.value)) {
+        if (!activeVm && !['setup', 'create', 'import', 'switch'].includes(value)) {
             setMessage('No active VM selected.');
             return;
         }
 
         try {
-            switch (item.value) {
+            switch (value) {
                 case 'start':
                     setMessage(`Starting ${activeVm}...`);
                     try {
@@ -291,11 +396,13 @@ export const App = () => {
                     });
                     setView('browser');
                     break;
-                case 'resize':
+                case 'resume':
                     setMessage(`Resuming/Waking ${activeVm}...`);
-                    // Intelligent resume logic like in Python could be added here
                     await system.runCmd(`virsh -c qemu:///system resume ${activeVm}`, { useSudo: true });
                     setMessage(`Resume command sent to ${activeVm}`);
+                    break;
+                case 'resize':
+                    setMessage(`Resize feature for ${activeVm} not yet implemented.`);
                     break;
                 case 'hibernate':
                     setMessage(`Hibernating (ManagedSave) ${activeVm}...`);
@@ -319,7 +426,7 @@ export const App = () => {
                     setMessage(`Viewer launched for ${activeVm}`);
                     break;
                 default:
-                    setMessage(`Feature ${item.value} not fully implemented yet.`);
+                    setMessage(`Feature ${value} not fully implemented yet.`);
             }
         } catch (e: any) {
             setMessage(`Error: ${e.message}`);
@@ -398,16 +505,6 @@ export const App = () => {
         }
     };
 
-	const handleVmSelect = (item: any) => {
-        if (item.value === 'back') {
-            setView('main');
-            return;
-        }
-        setActiveVm(item.value);
-        setView('main');
-        setMessage(`Selected VM: ${item.value}`);
-    };
-
 	return (
 		<Box flexDirection="column" padding={1}>
 			<Box borderStyle="round" borderColor="blue" paddingX={1} marginBottom={1}>
@@ -422,7 +519,7 @@ export const App = () => {
                 </Box>
 			</Box>
 
-            {view === 'main' && <MainMenu key="main" onSelect={handleSelect} />}
+            {view === 'main' && <MainMenu key="main" onSelect={handleSelect} activeVm={activeVm} />}
             
             {view === 'setup' && <SetupMenu key="setup" onSelect={handleSetupSelect} />}
 
@@ -439,21 +536,21 @@ export const App = () => {
                 />
             )}
 
-            {view === 'switch' && (
-                <Box flexDirection="column">
-                    <Text bold color="blue">Select VM</Text>
-                    <SelectInput 
-                        items={[
-                            ...Object.keys(config.VM_REGISTRY).map(name => ({ label: name, value: name })),
-                            { label: 'Back', value: 'back' }
-                        ]} 
-                        onSelect={handleVmSelect} 
-                    />
+            {message && (
+                <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="yellow">
+                    <Text>{message}</Text>
                 </Box>
             )}
 
-            {message && (
-                <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="yellow">
+			<Box marginTop={1}>
+				<Text dimColor>Press Q to quit</Text>
+			</Box>
+		</Box>
+	);
+};
+
+export default App;
+     <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="yellow">
                     <Text>{message}</Text>
                 </Box>
             )}
