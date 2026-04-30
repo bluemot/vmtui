@@ -203,6 +203,54 @@ export interface UsbDevice {
     pid: string;
     name: string;
     attached: boolean;
+    attachedVm?: string | null;
+}
+
+export async function getAllUsbDevices(): Promise<UsbDevice[]> {
+    const devices: UsbDevice[] = [];
+    const lsusb = await runCmd("lsusb", { shell: true, check: false });
+    if (!lsusb) return [];
+
+    // Get all XML files to see which USB is attached where
+    // This is faster than calling virsh dumpxml for each VM
+    const xmlFiles = await runCmd("sudo ls /etc/libvirt/qemu/*.xml", { shell: true, check: false });
+    const vmXmls: Record<string, string> = {};
+    
+    if (xmlFiles) {
+        const files = xmlFiles.split(/\s+/).filter(f => f.endsWith('.xml') && !f.includes('networks'));
+        for (const file of files) {
+            const content = await runCmd(`sudo cat ${file}`, { shell: true, check: false });
+            if (content) {
+                const vmName = path.basename(file, '.xml');
+                vmXmls[vmName] = content;
+            }
+        }
+    }
+
+    const lines = lsusb.split('\n');
+    for (const line of lines) {
+        const match = line.match(/ID ([0-9a-fA-F]+):([0-9a-fA-F]+) (.+)/);
+        if (match) {
+            const vid = match[1];
+            const pid = match[2];
+            const name = match[3];
+            let attachedVm: string | null = null;
+            
+            for (const [vmName, xml] of Object.entries(vmXmls)) {
+                if (xml.includes(`vendor id='0x${vid}'`) && xml.includes(`product id='0x${pid}'`)) {
+                    attachedVm = vmName;
+                    break;
+                }
+            }
+            
+            devices.push({ 
+                vid, pid, name, 
+                attached: attachedVm !== null,
+                attachedVm 
+            });
+        }
+    }
+    return devices;
 }
 
 export async function getUsbDevices(vmName: string): Promise<UsbDevice[]> {

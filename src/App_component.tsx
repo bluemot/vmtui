@@ -11,11 +11,13 @@ import { FileBrowser } from './FileBrowser.js';
 const MainMenu = ({ onSelect, activeVm }: { onSelect: (value: string) => void, activeVm: string }) => {
     const [focusArea, setFocusArea] = useState<'categories' | 'items'>('categories');
     const [activeCategory, setActiveCategory] = useState('manage');
+    const [usbDevices, setUsbDevices] = useState<system.UsbDevice[]>([]);
 
     const categories = [
         { label: ' 🛠  VM Manage    ', value: 'manage' },
         { label: ' ⚡  Power/Pause  ', value: 'power' },
         { label: ' 👁  View/Logs    ', value: 'view' },
+        { label: ' 🔌  USB Manager  ', value: 'usb' },
         { label: ' 🔄  Switch VM   ', value: 'switch' },
         { label: ' 🚪  Quit        ', value: 'quit' }
     ];
@@ -25,6 +27,21 @@ const MainMenu = ({ onSelect, activeVm }: { onSelect: (value: string) => void, a
         value: `select-vm:${name}`
     }));
 
+    useEffect(() => {
+        if (activeCategory === 'usb') {
+            system.getAllUsbDevices().then(setUsbDevices);
+        }
+    }, [activeCategory]);
+
+    const usbItems = usbDevices.map(d => {
+        let label = d.attached ? `[ON] ` : `[  ] `;
+        label += `${d.vid}:${d.pid} ${d.name}`;
+        if (d.attached && d.attachedVm) {
+            label += ` (${d.attachedVm.substring(0, 5)})`;
+        }
+        return { label, value: `usb-toggle:${d.vid}:${d.pid}` };
+    });
+
     const subItems: Record<string, { label: string, value: string }[]> = {
         manage: [
             { label: '1. Setup Host Environment', value: 'setup' },
@@ -33,8 +50,7 @@ const MainMenu = ({ onSelect, activeVm }: { onSelect: (value: string) => void, a
             { label: '4. Import / Rescue VM', value: 'import' },
             { label: '5. Resize VM Disk', value: 'resize' },
             { label: '6. VM Individual Settings', value: 'settings' },
-            { label: '7. USB Manager', value: 'usb' },
-            { label: '8. Delete Active VM', value: 'delete' },
+            { label: '7. Delete Active VM', value: 'delete' },
         ],
         power: [
             { label: '1. Start / Restore', value: 'start' },
@@ -50,6 +66,7 @@ const MainMenu = ({ onSelect, activeVm }: { onSelect: (value: string) => void, a
             { label: '2. Tail Install/Boot Log', value: 'tail' },
             { label: '3. Viewer (Graphical)', value: 'viewer' },
         ],
+        usb: usbItems.length > 0 ? usbItems : [{ label: 'No USB devices found', value: 'noop' }],
         switch: vmItems.length > 0 ? vmItems : [{ label: 'No VMs found', value: 'noop' }],
         quit: [
             { label: 'Confirm Exit', value: 'quit' }
@@ -76,6 +93,11 @@ const MainMenu = ({ onSelect, activeVm }: { onSelect: (value: string) => void, a
         }
         if (focusArea === 'items' && (key.leftArrow || key.escape || key.backspace)) {
             setFocusArea('categories');
+        }
+        if (activeCategory === 'usb' && focusArea === 'items' && (input === 'a' || input === 'A')) {
+            // Trigger select manually for 'a' key
+            // This is a bit tricky with ink-select-input, but we can't easily get the current highlighted item here
+            // SelectInput handles its own state.
         }
     });
 
@@ -111,13 +133,20 @@ const MainMenu = ({ onSelect, activeVm }: { onSelect: (value: string) => void, a
                         items={subItems[activeCategory] || []} 
                         onSelect={(item) => {
                             if (item.value === 'back') setFocusArea('categories');
-                            else onSelect(item.value);
+                            else {
+                                onSelect(item.value);
+                                if (activeCategory === 'usb') {
+                                    // Refresh USB list after action
+                                    setTimeout(() => system.getAllUsbDevices().then(setUsbDevices), 1000);
+                                }
+                            }
                         }}
                         isFocused={focusArea === 'items'}
                     />
                     {focusArea === 'items' && (
                         <Box marginTop={1}>
                             <Text dimColor>← Left / Esc to back</Text>
+                            {activeCategory === 'usb' && <Text color="yellow"> | Enter/A to toggle</Text>}
                         </Box>
                     )}
                     {focusArea === 'categories' && activeCategory !== 'quit' && (
@@ -213,52 +242,11 @@ const CreateVMWizard = ({ onComplete, onCancel }: { onComplete: (data: any) => v
     );
 };
 
-const UsbManager = ({ vmName, onBack }: { vmName: string, onBack: () => void }) => {
-    const [devices, setDevices] = useState<system.UsbDevice[]>([]);
-
-    const refresh = async () => {
-        const devs = await system.getUsbDevices(vmName);
-        setDevices(devs);
-    };
-
-    useEffect(() => {
-        refresh();
-    }, [vmName]);
-
-    const handleSelect = async (item: any) => {
-        if (item.value === 'back') {
-            onBack();
-            return;
-        }
-        const dev = devices.find(d => `${d.vid}:${d.pid}` === item.value);
-        if (dev) {
-            await system.toggleUsbDevice(vmName, dev);
-            await refresh();
-        }
-    };
-
-    return (
-        <Box flexDirection="column">
-            <Text bold color="blue">USB Manager for {vmName}</Text>
-            <SelectInput 
-                items={[
-                    ...devices.map(d => ({ 
-                        label: `${d.attached ? '[ATTACHED]' : '[ FREE ]'} ${d.vid}:${d.pid} - ${d.name}`, 
-                        value: `${d.vid}:${d.pid}` 
-                    })),
-                    { label: 'Back', value: 'back' }
-                ]} 
-                onSelect={handleSelect} 
-            />
-        </Box>
-    );
-};
-
 export const App = () => {
     const { exit } = useApp();
     const [activeVm, setActiveVm] = useState<string>('');
     const [vmState, setVmState] = useState<string>('Stopped');
-    const [view, setView] = useState<'main' | 'setup' | 'browser' | 'create' | 'usb'>('main');
+    const [view, setView] = useState<'main' | 'setup' | 'browser' | 'create'>('main');
     const [message, setMessage] = useState<string>('');
     const [browserMode, setBrowserMode] = useState<'file' | 'directory'>('directory');
     const [browserTitle, setBrowserTitle] = useState<string>('Select Directory');
@@ -312,8 +300,24 @@ export const App = () => {
             return;
         }
 
+        if (value.startsWith('usb-toggle:')) {
+            if (!activeVm) {
+                setMessage('No active VM selected to attach/detach USB.');
+                return;
+            }
+            const [_, vid, pid] = value.split(':');
+            const devices = await system.getAllUsbDevices();
+            const dev = devices.find(d => d.vid === vid && d.pid === pid);
+            if (dev) {
+                const targetVm = dev.attached ? (dev.attachedVm || activeVm) : activeVm;
+                setMessage(`${dev.attached ? 'Detaching' : 'Attaching'} USB ${vid}:${pid} ${dev.attached ? 'from' : 'to'} ${targetVm}...`);
+                await system.toggleUsbDevice(targetVm, dev);
+                setMessage(`USB ${vid}:${pid} ${dev.attached ? 'detached' : 'attached'}.`);
+            }
+            return;
+        }
+
         if (value === 'switch') {
-            // Focus is now handled by the sub-menu items
             return;
         }
 
@@ -398,8 +402,6 @@ export const App = () => {
                         if (dir) {
                             const name = path.basename(dir);
                             setMessage(`Importing ${name} from ${dir}...`);
-                            // In a full implementation, we'd scan for qcow2 and call virt-install --import
-                            // For now, register it in our registry
                             config.VM_REGISTRY[name] = { dir, host_share: config.HOST_SHARE_DIR };
                             await config.saveRegistry();
                             setActiveVm(name);
@@ -424,7 +426,6 @@ export const App = () => {
                     break;
                 case 'console':
                     setMessage(`Entering console for ${activeVm}... (UI will pause)`);
-                    // Use setTimeout to allow message to render before blocking
                     setTimeout(() => {
                         system.runInteractive('virsh', ['-c', 'qemu:///system', 'console', activeVm]);
                         setMessage(`Exited console for ${activeVm}`);
@@ -446,9 +447,6 @@ export const App = () => {
                     } else {
                         setMessage(`VM directory not found for ${activeVm}`);
                     }
-                    break;
-                case 'usb':
-                    setView('usb');
                     break;
                 case 'viewer':
                     setMessage(`Launching viewer for ${activeVm}...`);
@@ -472,8 +470,6 @@ export const App = () => {
         if (item.value === 'install') {
             setMessage('Installing KVM packages... (Check vmtui.log for details)');
             try {
-                // In a real implementation, we would want to stream the output or show progress
-                // For now, we'll run it in background or just wait
                 const pkgs = [
                     "qemu-system-x86", "libvirt-daemon-system", "libvirt-clients", "virtinst", 
                     "virt-viewer", "swtpm", "swtpm-tools", "acl", "ovmf", 
@@ -517,14 +513,9 @@ export const App = () => {
             if (data.osType === 'linux-cloud') {
                 const imgData = config.LINUX_IMAGES[data.distro];
                 const diskPath = path.join(vmDir, `${data.name}.qcow2`);
-                
-                // This will take time, maybe we should run it without awaiting or with better feedback
                 await system.createLinuxCloudVM(data.name, vmDir, diskPath, data.diskSize, imgData, config.HOST_SHARE_DIR);
-                
-                // Register in config
                 config.VM_REGISTRY[data.name] = { dir: vmDir, host_share: config.HOST_SHARE_DIR, installing: true };
                 await config.saveRegistry();
-                
                 setActiveVm(data.name);
                 setMessage(`VM ${data.name} created successfully.`);
             } else {
@@ -554,8 +545,6 @@ export const App = () => {
             {view === 'setup' && <SetupMenu key="setup" onSelect={handleSetupSelect} />}
 
             {view === 'create' && <CreateVMWizard onComplete={handleCreateComplete} onCancel={() => setView('main')} />}
-
-            {view === 'usb' && <UsbManager vmName={activeVm} onBack={() => setView('main')} />}
 
             {view === 'browser' && (
                 <FileBrowser 

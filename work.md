@@ -37,7 +37,7 @@ This project aims to port the functionality of `vmtui.py` (Python) to a TypeScri
 ### 4. VM Management
 - [x] Switch Active VM
 - [x] Import / Rescue Existing VM Directory
-- [x] USB Device Manager (Attach/Detach)
+- [x] USB Device Manager (Attach/Detach) - *Simplified: Moved to Main Menu, auto-detects host attachments*
 - [x] Background State Poller (Status updates every 5s)
 - [ ] Duplicate/Clone VM - *Menu entry exists, logic missing*
 - [ ] Resize VM Disk - *Current implementation incorrectly maps 'resize' to 'resume'*
