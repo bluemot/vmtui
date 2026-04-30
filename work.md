@@ -48,7 +48,7 @@ This project aims to port the functionality of `vmtui.py` (Python) to a TypeScri
 ### 5. Access & Monitoring
 - [x] Console Access (Text-based via `virsh console`)
 - [x] Viewer Access (Graphical - `virt-viewer`)
-- [ ] Tail Install/Boot Logs
+- [x] Tail Install/Boot Logs (via `tail -f`)
 - [ ] Zombie VM Detection & Cleanup
 
 ## Progress Tracking

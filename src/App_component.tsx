@@ -430,6 +430,23 @@ export const App = () => {
                         setMessage(`Exited console for ${activeVm}`);
                     }, 500);
                     break;
+                case 'tail':
+                    const vmInfo = config.VM_REGISTRY[activeVm];
+                    if (vmInfo && vmInfo.dir) {
+                        const logPath = path.join(vmInfo.dir, `${activeVm}-console.log`);
+                        setMessage(`Tailing log for ${activeVm}... (UI will pause)`);
+                        setTimeout(async () => {
+                            try {
+                                await system.tailLog(logPath);
+                                setMessage(`Exited log tail for ${activeVm}`);
+                            } catch (e: any) {
+                                setMessage(`Error: ${e.message}`);
+                            }
+                        }, 500);
+                    } else {
+                        setMessage(`VM directory not found for ${activeVm}`);
+                    }
+                    break;
                 case 'usb':
                     setView('usb');
                     break;

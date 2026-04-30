@@ -187,7 +187,7 @@ runcmd:
         "--channel", "spicevmc",
         "--channel", "unix,target.type=virtio,name=org.qemu.guest_agent.0",
         "--serial", "pty", 
-        "--serial", `file,path={log_path}`,
+        "--serial", `file,path=${logPath}`,
         "--console", "pty,target_type=serial",
         `--filesystem`, `source=${hostShareDir},target=host_share,driver.type=virtiofs,accessmode=passthrough`,
         "--cpu", "host-passthrough",
@@ -236,6 +236,13 @@ export async function toggleUsbDevice(vmName: string, device: UsbDevice): Promis
 
 export async function defineVm(xmlPath: string): Promise<void> {
     await runCmd(`virsh -c qemu:///system define ${xmlPath}`, { useSudo: true, check: true });
+}
+
+export async function tailLog(logPath: string): Promise<void> {
+    if (!(await fs.access(logPath).then(() => true).catch(() => false))) {
+        throw new Error(`Log file not found: ${logPath}`);
+    }
+    runInteractive('tail', ['-f', logPath]);
 }
 
 export async function getVmStates(): Promise<Record<string, string>> {
