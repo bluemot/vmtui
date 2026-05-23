@@ -21,6 +21,7 @@ import os
 import sys
 import subprocess
 import time
+import threading
 import shutil
 import json
 import re
@@ -579,16 +580,20 @@ def setup_host(stdscr):
         
         if choice == 0:
             pkgs = [
-                "qemu-kvm", "libvirt-daemon-system", "libvirt-clients", "virtinst", 
+                "libvirt-daemon-system", "libvirt-clients", "virtinst", 
                 "virt-viewer", "swtpm", "swtpm-tools", "acl", "ovmf", 
-                "cloud-image-utils", "unzip", "wireless-tools", "bridge-utils",
+                "cloud-image-utils", "unzip", "bridge-utils",
                 "libnss-libvirt"
             ]
             
-            # On newer Ubuntu (24.04+), virtiofsd is a separate package
+            # Ubuntu 24.04+ (noble+) replaced qemu-kvm with qemu-system-x86
             try:
                 os_release = run_cmd("lsb_release -sc", shell=True, check=False)
-                if os_release and os_release.strip() not in ["focal", "jammy"]:
+                codename = os_release.strip() if os_release else ""
+                if codename in ["focal", "jammy"]:
+                    pkgs.append("qemu-kvm")
+                else:
+                    pkgs.append("qemu-system-x86")
                     pkgs.append("virtiofsd")
             except: pass
 
@@ -817,7 +822,6 @@ packages:
   - network-manager
   - rfkill
   - iw
-  - wireless-tools
   - unzip
   - vim
   - libnl-genl-3-dev
