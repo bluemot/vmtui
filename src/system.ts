@@ -34,10 +34,16 @@ export async function downloadFile(url: string, filename: string, onProgress?: (
 }
 
 
+let cachedSudoPass: string | null = null;
+
 async function getSudoPass(): Promise<string | null> {
+    if (cachedSudoPass !== null) {
+        return cachedSudoPass;
+    }
     try {
         const pass = await fs.readFile('.sudo_pass', 'utf-8');
-        return pass.trim();
+        cachedSudoPass = pass.trim();
+        return cachedSudoPass;
     } catch {
         return null;
     }
@@ -82,6 +88,45 @@ export async function runCmd(cmd: string | string[], options: { shell?: boolean 
     }
 }
 
+export function setSudoPass(pass: string): void {
+    cachedSudoPass = pass;
+}
+
+export function isRoot(): boolean {
+    return typeof process.getuid === 'function' && process.getuid() === 0;
+}
+
+export async function checkSudoNoPassword(): Promise<boolean> {
+    try {
+        await runCmd('sudo -n true', { shell: true, check: true });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export async function validateSudoPass(pass: string): Promise<boolean> {
+    try {
+        await execAsync(`echo "${pass}" | sudo -S true`, { shell: true } as any);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export async function initSudoAuth(pass: string): Promise<boolean> {
+    const valid = await validateSudoPass(pass);
+    if (valid) {
+        cachedSudoPass = pass;
+        try {
+            await execAsync(`echo "${pass}" | sudo -S -v`, { shell: true } as any);
+        } catch {
+            // -v may fail on some systems; cache is still enough for runCmd
+        }
+    }
+    return valid;
+}
+
 export function spawnDetached(cmd: string, args: string[], useSudo: boolean = false) {
     let finalCmd = cmd;
     let finalArgs = args;
@@ -94,15 +139,59 @@ export function spawnDetached(cmd: string, args: string[], useSudo: boolean = fa
         finalArgs = [cmd, ...args];
     }
 
+    logger.debug(`Spawning detached: ${finalCmd} ${finalArgs.join(' ')}`);
     const child = spawn(finalCmd, finalArgs, {
         detached: true,
         stdio: 'ignore'
     });
+    child.on('error', (err) => {
+        logger.error(`Failed to spawn ${finalCmd}: ${err.message}`);
+    });
+    child.on('exit', (code) => {
+        if (code !== 0 && code !== null) {
+            logger.warn(`${finalCmd} exited with code ${code}`);
+        }
+    });
     child.unref();
 }
 
-export function runInteractive(cmd: string, args: string[]): void {
-    spawnSync(cmd, args, { stdio: 'inherit' });
+export function runInteractive(cmd: string, args: string[], useSudo: boolean = false): void {
+    let finalCmd = cmd;
+    let finalArgs = args;
+
+    if (useSudo && process.env.SUDO_USER) {
+        finalCmd = 'sudo';
+        finalArgs = ['-E', '-u', process.env.SUDO_USER, cmd, ...args];
+    } else if (useSudo) {
+        finalCmd = 'sudo';
+        finalArgs = [cmd, ...args];
+    }
+
+    // Ink sets terminal to raw mode; restore cooked mode before
+    // handing control to an interactive child process.
+    const wasRaw = process.stdin.isTTY && (process.stdin as any).isRaw;
+    if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+    }
+
+    // Clear the screen and move cursor to top-left so the child
+    // starts with a clean terminal area.
+    process.stdout.write('\x1b[2J\x1b[0f');
+    process.stdout.write(`--- Running: ${finalCmd} ${finalArgs.join(' ')} ---\n`);
+    process.stdout.write('Press Ctrl+C (or appropriate quit key) to return to VMTUI\n\n');
+
+    try {
+        spawnSync(finalCmd, finalArgs, { stdio: 'inherit' });
+    } finally {
+        // Restore raw mode so Ink resumes correctly
+        if (process.stdin.isTTY && wasRaw) {
+            process.stdin.setRawMode(true);
+            process.stdin.resume();
+        }
+        // Force a full redraw by clearing and telling Ink to repaint
+        process.stdout.write('\x1b[2J\x1b[0f');
+    }
 }
 
 export interface VmState {
@@ -286,11 +375,219 @@ export async function defineVm(xmlPath: string): Promise<void> {
     await runCmd(`virsh -c qemu:///system define ${xmlPath}`, { useSudo: true, check: true });
 }
 
+export async function checkCommandExists(cmd: string): Promise<boolean> {
+    const result = await runCmd(`command -v ${cmd}`, { shell: true, check: false });
+    return !!result;
+}
+
 export async function tailLog(logPath: string): Promise<void> {
     if (!(await fs.access(logPath).then(() => true).catch(() => false))) {
         throw new Error(`Log file not found: ${logPath}`);
     }
-    runInteractive('tail', ['-f', logPath]);
+    runInteractive('tail', ['-f', '-n', '50', logPath]);
+}
+
+export interface VmDisk {
+    path: string;
+    device: string;
+    bus?: string;
+    type?: string;
+}
+
+export interface VmNic {
+    type: string;
+    model?: string;
+    mac?: string;
+    source?: string;
+}
+
+export interface VmGraphics {
+    type: string;
+    port?: string;
+    listen?: string;
+}
+
+export interface VmVideo {
+    type: string;
+    vram?: string;
+    heads?: string;
+}
+
+export interface VmUsbDevice {
+    vid: string;
+    pid: string;
+}
+
+export interface VmInfo {
+    name: string;
+    uuid: string;
+    memory: string;
+    currentMemory: string;
+    vcpu: number;
+    cpuModel: string;
+    osType: string;
+    osVariant: string;
+    arch: string;
+    machine: string;
+    disks: VmDisk[];
+    nics: VmNic[];
+    graphics: VmGraphics[];
+    videos: VmVideo[];
+    usbDevices: VmUsbDevice[];
+    filesystems: { source: string; target: string }[];
+    serials: string[];
+    channels: string[];
+}
+
+export async function getVmInfo(vmName: string): Promise<VmInfo | null> {
+    const xml = await runCmd(`virsh -c qemu:///system dumpxml ${vmName}`, { useSudo: true, check: false });
+    if (!xml) return null;
+
+    const info: VmInfo = {
+        name: vmName,
+        uuid: '',
+        memory: '',
+        currentMemory: '',
+        vcpu: 0,
+        cpuModel: '',
+        osType: '',
+        osVariant: '',
+        arch: '',
+        machine: '',
+        disks: [],
+        nics: [],
+        graphics: [],
+        videos: [],
+        usbDevices: [],
+        filesystems: [],
+        serials: [],
+        channels: []
+    };
+
+    const nameMatch = xml.match(/<name>([^<]+)<\/name>/);
+    if (nameMatch) info.name = nameMatch[1];
+
+    const uuidMatch = xml.match(/<uuid>([^<]+)<\/uuid>/);
+    if (uuidMatch) info.uuid = uuidMatch[1];
+
+    const memMatch = xml.match(/<memory[^>]*>(\d+)<\/memory>/);
+    if (memMatch) {
+        const memKiB = parseInt(memMatch[1], 10);
+        info.memory = `${Math.round(memKiB / 1024)} MB`;
+    }
+
+    const curMemMatch = xml.match(/<currentMemory[^>]*>(\d+)<\/currentMemory>/);
+    if (curMemMatch) {
+        const memKiB = parseInt(curMemMatch[1], 10);
+        info.currentMemory = `${Math.round(memKiB / 1024)} MB`;
+    }
+
+    const vcpuMatch = xml.match(/<vcpu[^>]*>(\d+)<\/vcpu>/);
+    if (vcpuMatch) info.vcpu = parseInt(vcpuMatch[1], 10);
+
+    const cpuModelMatch = xml.match(/<model[^>]*>([^<]+)<\/model>/);
+    if (cpuModelMatch) info.cpuModel = cpuModelMatch[1];
+
+    const osTypeMatch = xml.match(/<type[^>]*arch='([^']+)'[^>]*machine='([^']+)'[^>]*>([^<]+)<\/type>/);
+    if (osTypeMatch) {
+        info.arch = osTypeMatch[1];
+        info.machine = osTypeMatch[2];
+        info.osType = osTypeMatch[3];
+    }
+
+    const osVariantMatch = xml.match(/<os[^>]*>[\s\S]*?<\/os>/);
+    if (osVariantMatch) {
+        const variant = osVariantMatch[0].match(/<osinfo [^>]*id='([^']+)'/);
+        if (variant) info.osVariant = variant[1];
+    }
+
+    const diskMatches = xml.matchAll(/<disk[^>]*type='([^']+)'[^>]*device='([^']+)'[^>]*>[\s\S]*?<\/disk>/g);
+    for (const m of diskMatches) {
+        const diskXml = m[0];
+        const sourceMatch = diskXml.match(/<source[^>]*(?:file|dev|pool|volume)='([^']+)'/);
+        const busMatch = diskXml.match(/<target[^>]*bus='([^']+)'/);
+        if (sourceMatch) {
+            info.disks.push({
+                path: sourceMatch[1],
+                device: m[2],
+                bus: busMatch ? busMatch[1] : undefined,
+                type: m[1]
+            });
+        }
+    }
+
+    const nicMatches = xml.matchAll(/<interface[^>]*type='([^']+)'[^>]*>[\s\S]*?<\/interface>/g);
+    for (const m of nicMatches) {
+        const nicXml = m[0];
+        const modelMatch = nicXml.match(/<model[^>]*type='([^']+)'/);
+        const macMatch = nicXml.match(/<mac[^>]*address='([^']+)'/);
+        const sourceMatch = nicXml.match(/<source[^>]*(?:network|bridge|dev)='([^']+)'/);
+        info.nics.push({
+            type: m[1],
+            model: modelMatch ? modelMatch[1] : undefined,
+            mac: macMatch ? macMatch[1] : undefined,
+            source: sourceMatch ? sourceMatch[1] : undefined
+        });
+    }
+
+    const graphicsMatches = xml.matchAll(/<graphics[^>]*type='([^']+)'[^>]*\/?>/g);
+    for (const m of graphicsMatches) {
+        const gfxXml = m[0];
+        const portMatch = gfxXml.match(/port='(\d+)'/);
+        const listenMatch = gfxXml.match(/listen='([^']+)'/);
+        info.graphics.push({
+            type: m[1],
+            port: portMatch ? portMatch[1] : undefined,
+            listen: listenMatch ? listenMatch[1] : undefined
+        });
+    }
+
+    const videoMatches = xml.matchAll(/<video>[\s\S]*?<\/video>/g);
+    for (const m of videoMatches) {
+        const videoXml = m[0];
+        const modelMatch = videoXml.match(/<model[^>]*type='([^']+)'/);
+        const vramMatch = videoXml.match(/vram='(\d+)'/);
+        const headsMatch = videoXml.match(/heads='(\d+)'/);
+        if (modelMatch) {
+            info.videos.push({
+                type: modelMatch[1],
+                vram: vramMatch ? vramMatch[1] : undefined,
+                heads: headsMatch ? headsMatch[1] : undefined
+            });
+        }
+    }
+
+    const usbMatches = xml.matchAll(/<hostdev[^>]*type='usb'[^>]*>[\s\S]*?<\/hostdev>/g);
+    for (const m of usbMatches) {
+        const usbXml = m[0];
+        const vidMatch = usbXml.match(/vendor[^>]*id='0x([^']+)'/);
+        const pidMatch = usbXml.match(/product[^>]*id='0x([^']+)'/);
+        if (vidMatch && pidMatch) {
+            info.usbDevices.push({ vid: vidMatch[1], pid: pidMatch[1] });
+        }
+    }
+
+    const fsMatches = xml.matchAll(/<filesystem[^>]*>[\s\S]*?<\/filesystem>/g);
+    for (const m of fsMatches) {
+        const fsXml = m[0];
+        const sourceMatch = fsXml.match(/<source[^>]*dir='([^']+)'/);
+        const targetMatch = fsXml.match(/<target[^>]*dir='([^']+)'/);
+        if (sourceMatch && targetMatch) {
+            info.filesystems.push({ source: sourceMatch[1], target: targetMatch[1] });
+        }
+    }
+
+    const serialMatches = xml.matchAll(/<serial[^>]*type='([^']+)'[^>]*\/?>/g);
+    for (const m of serialMatches) {
+        info.serials.push(m[1]);
+    }
+
+    const channelMatches = xml.matchAll(/<channel[^>]*type='([^']+)'[^>]*\/?>/g);
+    for (const m of channelMatches) {
+        info.channels.push(m[1]);
+    }
+
+    return info;
 }
 
 export async function getVmStates(): Promise<Record<string, string>> {

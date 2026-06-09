@@ -8,6 +8,32 @@ import * as config from './config.js';
 import * as system from './system.js';
 import { FileBrowser } from './FileBrowser.js';
 
+const PasswordPrompt = ({ onSubmit, error }: { onSubmit: (pass: string) => void, error?: string }) => {
+    const [value, setValue] = useState('');
+    return (
+        <Box flexDirection="column" alignItems="center" marginTop={2}>
+            <Text bold color="blue">🔐 Sudo Authentication Required</Text>
+            <Box marginTop={1}>
+                <Text>This tool requires root privileges for VM management.</Text>
+            </Box>
+            {error && (
+                <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="red">
+                    <Text color="red">{error}</Text>
+                </Box>
+            )}
+            <Box marginTop={1} flexDirection="column" width={40}>
+                <Text>Enter sudo password:</Text>
+                <Box borderStyle="single" borderColor="green" paddingX={1}>
+                    <TextInput value={value} onChange={setValue} onSubmit={() => onSubmit(value)} mask="*" />
+                </Box>
+            </Box>
+            <Box marginTop={1}>
+                <Text dimColor>Press Enter to submit, Ctrl+C to quit</Text>
+            </Box>
+        </Box>
+    );
+};
+
 const MainMenu = ({ onSelect, activeVm }: { onSelect: (value: string) => void, activeVm: string }) => {
     const [focusArea, setFocusArea] = useState<'categories' | 'items'>('categories');
     const [activeCategory, setActiveCategory] = useState('manage');
@@ -51,6 +77,7 @@ const MainMenu = ({ onSelect, activeVm }: { onSelect: (value: string) => void, a
             { label: '5. Resize VM Disk', value: 'resize' },
             { label: '6. VM Individual Settings', value: 'settings' },
             { label: '7. Delete Active VM', value: 'delete' },
+            { label: '8. VM Info (Hardware/OS)', value: 'vm-info' },
         ],
         power: [
             { label: '1. Start / Restore', value: 'start' },
@@ -242,12 +269,132 @@ const CreateVMWizard = ({ onComplete, onCancel }: { onComplete: (data: any) => v
     );
 };
 
+const VMInfoPanel = ({ vmName, info, onBack }: { vmName: string, info: system.VmInfo | null, onBack: () => void }) => {
+    useInput((input, key) => {
+        if (key.escape || key.backspace || input === 'q' || input === 'Q') {
+            onBack();
+        }
+    });
+
+    if (!info) {
+        return (
+            <Box flexDirection="column" padding={1}>
+                <Text bold color="red">Failed to retrieve VM info for {vmName}</Text>
+                <Box marginTop={1}>
+                    <Text dimColor>Press Q / Esc to go back</Text>
+                </Box>
+            </Box>
+        );
+    }
+
+    const SectionHeader = ({ icon, title }: { icon: string, title: string }) => (
+        <Box marginTop={1}>
+            <Text bold color="yellow">{icon} {title}</Text>
+        </Box>
+    );
+
+    return (
+        <Box flexDirection="column" padding={1}>
+            <Text bold color="blue">📋 VM Info: {info.name}</Text>
+            <Box borderStyle="round" borderColor="cyan" paddingX={1} marginTop={1} flexDirection="column">
+                <Text bold color="yellow">🖥  Basic</Text>
+                <Text>  Name:     {info.name}</Text>
+                <Text>  UUID:     {info.uuid}</Text>
+                <Text>  Memory:   {info.memory} (current: {info.currentMemory})</Text>
+                <Text>  vCPUs:    {info.vcpu}</Text>
+                {info.cpuModel && <Text>  CPU:      {info.cpuModel}</Text>}
+                <Text>  OS Type:  {info.osType}</Text>
+                {info.osVariant && <Text>  OS Var:   {info.osVariant}</Text>}
+                <Text>  Arch:     {info.arch}</Text>
+                <Text>  Machine:  {info.machine}</Text>
+
+                {info.disks.length > 0 && (
+                    <>
+                        <SectionHeader icon="💾" title="Disks" />
+                        {info.disks.map((d, i) => (
+                            <Text key={i}>  [{d.device}] {d.path} {d.bus ? `(bus: ${d.bus})` : ''}</Text>
+                        ))}
+                    </>
+                )}
+
+                {info.nics.length > 0 && (
+                    <>
+                        <SectionHeader icon="🌐" title="Network" />
+                        {info.nics.map((n, i) => (
+                            <Text key={i}>  {n.type} {n.model ? `(${n.model})` : ''} {n.mac} {n.source ? `→ ${n.source}` : ''}</Text>
+                        ))}
+                    </>
+                )}
+
+                {info.graphics.length > 0 && (
+                    <>
+                        <SectionHeader icon="🖼" title="Graphics" />
+                        {info.graphics.map((g, i) => (
+                            <Text key={i}>  {g.type} {g.port ? `port: ${g.port}` : ''} {g.listen ? `listen: ${g.listen}` : ''}</Text>
+                        ))}
+                    </>
+                )}
+
+                {info.videos.length > 0 && (
+                    <>
+                        <SectionHeader icon="🎬" title="Video" />
+                        {info.videos.map((v, i) => (
+                            <Text key={i}>  {v.type} {v.vram ? `vram: ${v.vram}KB` : ''} {v.heads ? `heads: ${v.heads}` : ''}</Text>
+                        ))}
+                    </>
+                )}
+
+                {info.usbDevices.length > 0 && (
+                    <>
+                        <SectionHeader icon="🔌" title="USB" />
+                        {info.usbDevices.map((u, i) => (
+                            <Text key={i}>  VID: {u.vid} PID: {u.pid}</Text>
+                        ))}
+                    </>
+                )}
+
+                {info.filesystems.length > 0 && (
+                    <>
+                        <SectionHeader icon="📁" title="Filesystems" />
+                        {info.filesystems.map((f, i) => (
+                            <Text key={i}>  {f.source} → {f.target}</Text>
+                        ))}
+                    </>
+                )}
+
+                {info.serials.length > 0 && (
+                    <>
+                        <SectionHeader icon="🔌" title="Serials" />
+                        {info.serials.map((s, i) => (
+                            <Text key={i}>  type: {s}</Text>
+                        ))}
+                    </>
+                )}
+
+                {info.channels.length > 0 && (
+                    <>
+                        <SectionHeader icon="📡" title="Channels" />
+                        {info.channels.map((c, i) => (
+                            <Text key={i}>  type: {c}</Text>
+                        ))}
+                    </>
+                )}
+            </Box>
+            <Box marginTop={1}>
+                <Text dimColor>Press Q / Esc to go back</Text>
+            </Box>
+        </Box>
+    );
+};
+
 export const App = () => {
     const { exit } = useApp();
     const [activeVm, setActiveVm] = useState<string>('');
     const [vmState, setVmState] = useState<string>('Stopped');
-    const [view, setView] = useState<'main' | 'setup' | 'browser' | 'create'>('main');
+    const [view, setView] = useState<'main' | 'setup' | 'browser' | 'create' | 'auth' | 'vm-info'>('auth');
     const [message, setMessage] = useState<string>('');
+    const [passwordError, setPasswordError] = useState<string>('');
+    const [vmInfoData, setVmInfoData] = useState<system.VmInfo | null>(null);
     const [browserMode, setBrowserMode] = useState<'file' | 'directory'>('directory');
     const [browserTitle, setBrowserTitle] = useState<string>('Select Directory');
     const [browserStartPath, setBrowserStartPath] = useState<string>(config.USER_HOME);
@@ -263,6 +410,12 @@ export const App = () => {
     };
 
     useInput((input, key) => {
+        if (view === 'auth') {
+            if (key.ctrl && input === 'c') {
+                exit();
+            }
+            return;
+        }
         if (input === 'q' || input === 'Q') {
             if (view === 'main') exit();
         }
@@ -272,6 +425,21 @@ export const App = () => {
     });
 
     useEffect(() => {
+        const checkAuth = async () => {
+            if (system.isRoot()) {
+                setView('main');
+                return;
+            }
+            const noPass = await system.checkSudoNoPassword();
+            if (noPass) {
+                setView('main');
+            }
+        };
+        checkAuth();
+    }, []);
+
+    useEffect(() => {
+        if (view !== 'main') return;
         refreshData();
         const timer = setInterval(async () => {
             const states = await system.getVmStates();
@@ -281,7 +449,7 @@ export const App = () => {
         }, 5000);
 
         return () => clearInterval(timer);
-    }, [activeVm]);
+    }, [activeVm, view]);
 
     const handleSelect = async (value: string) => {
         if (value === 'quit') {
@@ -427,7 +595,7 @@ export const App = () => {
                 case 'console':
                     setMessage(`Entering console for ${activeVm}... (UI will pause)`);
                     setTimeout(() => {
-                        system.runInteractive('virsh', ['-c', 'qemu:///system', 'console', activeVm]);
+                        system.runInteractive('virsh', ['-c', 'qemu:///system', 'console', activeVm], true);
                         setMessage(`Exited console for ${activeVm}`);
                     }, 500);
                     break;
@@ -448,11 +616,30 @@ export const App = () => {
                         setMessage(`VM directory not found for ${activeVm}`);
                     }
                     break;
-                case 'viewer':
+                case 'viewer': {
+                    setMessage(`Checking for virt-viewer...`);
+                    const hasViewer = await system.checkCommandExists('virt-viewer');
+                    if (!hasViewer) {
+                        setMessage('Error: virt-viewer not found. Install it with: sudo apt install virt-viewer');
+                        break;
+                    }
                     setMessage(`Launching viewer for ${activeVm}...`);
                     system.spawnDetached('virt-viewer', ['--connect', 'qemu:///system', '--attach', activeVm], true);
                     setMessage(`Viewer launched for ${activeVm}`);
                     break;
+                }
+                case 'vm-info': {
+                    setMessage(`Fetching info for ${activeVm}...`);
+                    const info = await system.getVmInfo(activeVm);
+                    if (info) {
+                        setVmInfoData(info);
+                        setView('vm-info');
+                        setMessage('');
+                    } else {
+                        setMessage(`Failed to get info for ${activeVm}`);
+                    }
+                    break;
+                }
                 default:
                     setMessage(`Feature ${value} not fully implemented yet.`);
             }
@@ -528,30 +715,56 @@ export const App = () => {
 
     return (
         <Box flexDirection="column" padding={1}>
-            <Box borderStyle="round" borderColor="blue" paddingX={1} marginBottom={1}>
-                <Text bold> VMTUI (Ink) </Text>
-                <Box marginLeft={2}>
-                    <Text>Active VM: </Text>
-                    <Text color="green">{activeVm || 'None'}</Text>
+            {view !== 'auth' && (
+                <Box borderStyle="round" borderColor="blue" paddingX={1} marginBottom={1}>
+                    <Text bold> VMTUI (Ink) </Text>
+                    <Box marginLeft={2}>
+                        <Text>Active VM: </Text>
+                        <Text color="green">{activeVm || 'None'}</Text>
+                    </Box>
+                    <Box marginLeft={2}>
+                        <Text>Status: </Text>
+                        <Text color="yellow">[{vmState}]</Text>
+                    </Box>
                 </Box>
-                <Box marginLeft={2}>
-                    <Text>Status: </Text>
-                    <Text color="yellow">[{vmState}]</Text>
-                </Box>
-            </Box>
+            )}
+
+            {view === 'auth' && (
+                <PasswordPrompt
+                    onSubmit={(pass) => {
+                        system.initSudoAuth(pass).then((valid) => {
+                            if (valid) {
+                                setPasswordError('');
+                                setView('main');
+                            } else {
+                                setPasswordError('Incorrect password. Please try again.');
+                            }
+                        });
+                    }}
+                    error={passwordError}
+                />
+            )}
 
             {view === 'main' && <MainMenu key="main" onSelect={handleSelect} activeVm={activeVm} />}
-            
+
             {view === 'setup' && <SetupMenu key="setup" onSelect={handleSetupSelect} />}
 
             {view === 'create' && <CreateVMWizard onComplete={handleCreateComplete} onCancel={() => setView('main')} />}
 
             {view === 'browser' && (
-                <FileBrowser 
-                    title={browserTitle} 
-                    startPath={browserStartPath} 
-                    mode={browserMode} 
-                    onSelect={onBrowserSelect} 
+                <FileBrowser
+                    title={browserTitle}
+                    startPath={browserStartPath}
+                    mode={browserMode}
+                    onSelect={onBrowserSelect}
+                />
+            )}
+
+            {view === 'vm-info' && (
+                <VMInfoPanel
+                    vmName={activeVm}
+                    info={vmInfoData}
+                    onBack={() => setView('main')}
                 />
             )}
 
@@ -562,7 +775,7 @@ export const App = () => {
             )}
 
             <Box marginTop={1}>
-                <Text dimColor>Press Q to quit</Text>
+                <Text dimColor>{view === 'auth' ? 'Press Ctrl+C to quit' : 'Press Q to quit'}</Text>
             </Box>
         </Box>
     );
