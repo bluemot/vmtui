@@ -130,19 +130,27 @@ export async function initSudoAuth(pass: string): Promise<boolean> {
 export function spawnDetached(cmd: string, args: string[], useSudo: boolean = false) {
     let finalCmd = cmd;
     let finalArgs = args;
+    const env: Record<string, string | undefined> = {};
 
     if (useSudo && process.env.SUDO_USER) {
         finalCmd = 'sudo';
-        finalArgs = ['-E', '-u', process.env.SUDO_USER, cmd, ...args];
+        finalArgs = ['-u', process.env.SUDO_USER, cmd, ...args];
+        if (process.env.DISPLAY) {
+            env.DISPLAY = process.env.DISPLAY;
+        }
+        if (process.env.XAUTHORITY) {
+            env.XAUTHORITY = process.env.XAUTHORITY;
+        }
     } else if (useSudo) {
-        finalCmd = 'sudo';
-        finalArgs = [cmd, ...args];
+        // Running as regular user, no sudo needed for GUI apps
+        // (sudo would run as root which can't access user's X display)
     }
 
     logger.debug(`Spawning detached: ${finalCmd} ${finalArgs.join(' ')}`);
     const child = spawn(finalCmd, finalArgs, {
         detached: true,
-        stdio: 'ignore'
+        stdio: 'ignore',
+        env: Object.keys(env).length > 0 ? env : undefined
     });
     child.on('error', (err) => {
         logger.error(`Failed to spawn ${finalCmd}: ${err.message}`);

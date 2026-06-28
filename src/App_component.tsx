@@ -54,9 +54,15 @@ const MainMenu = ({ onSelect, activeVm }: { onSelect: (value: string) => void, a
     }));
 
     useEffect(() => {
+        let cancelled = false;
         if (activeCategory === 'usb') {
-            system.getAllUsbDevices().then(setUsbDevices);
+            system.getAllUsbDevices().then(devices => {
+                if (!cancelled) setUsbDevices(devices);
+            });
+        } else {
+            setUsbDevices([]);
         }
+        return () => { cancelled = true; };
     }, [activeCategory]);
 
     const usbItems = usbDevices.map(d => {
@@ -157,14 +163,15 @@ const MainMenu = ({ onSelect, activeVm }: { onSelect: (value: string) => void, a
                         </Text>
                     </Box>
                     <SelectInput 
+                        key={activeCategory}
                         items={subItems[activeCategory] || []} 
                         onSelect={(item) => {
                             if (item.value === 'back') setFocusArea('categories');
                             else {
                                 onSelect(item.value);
                                 if (activeCategory === 'usb') {
-                                    // Refresh USB list after action
-                                    setTimeout(() => system.getAllUsbDevices().then(setUsbDevices), 1000);
+                                    const timer = setTimeout(() => system.getAllUsbDevices().then(setUsbDevices), 1000);
+                                    return () => clearTimeout(timer);
                                 }
                             }
                         }}
