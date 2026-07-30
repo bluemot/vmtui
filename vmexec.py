@@ -7,6 +7,40 @@ import time
 import readline
 import os
 
+def make_bash_cmd(user_cmd):
+    """Build a bash -c command that sources .bashrc (bypassing the interactive
+    guard) before executing user_cmd, so PATH/aliases from .bashrc are applied."""
+    return (
+        "eval \"$(awk '/^case .- in/{f=1} f&&/^esac/{f=0;next} !f && !/PS1.*return/' ~/.bashrc)\"; "
+        + user_cmd
+    )
+
+def check_channel(vm_name):
+    """Test if the QEMU Guest Agent channel is alive."""
+    ping_cmd = [
+        "virsh", "-c", "qemu:///system",
+        "qemu-agent-command", vm_name,
+        json.dumps({"execute": "guest-ping"})
+    ]
+    try:
+        subprocess.check_output(ping_cmd, stderr=subprocess.STDOUT, timeout=5)
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"Error: QEMU Guest Agent on '{vm_name}' is not responding (timeout)", file=sys.stderr)
+        return False
+    except subprocess.CalledProcessError as e:
+        err = e.output.decode('utf-8', errors='ignore').lower()
+        if "not found" in err or "does not exist" in err:
+            print(f"Error: VM '{vm_name}' not found", file=sys.stderr)
+        elif "agent not responding" in err or "not connected" in err or "not configured" in err:
+            print(f"Error: VM '{vm_name}' is not running or QEMU Guest Agent is not installed/configured", file=sys.stderr)
+        else:
+            print(f"Error: Channel to VM '{vm_name}' is down - {e.output.decode('utf-8', errors='ignore').strip()}", file=sys.stderr)
+        return False
+    except FileNotFoundError:
+        print("Error: virsh not found. Is libvirt installed?", file=sys.stderr)
+        return False
+
 def run_qemu_agent(vm_name, command_list, interactive=False):
     """Execute command inside VM via QEMU Guest Agent with streaming output."""
     exec_args = {
@@ -67,6 +101,9 @@ def main():
         sys.exit(1)
         
     vm_name = sys.argv[1]
+
+    if not check_channel(vm_name):
+        sys.exit(1)
     
     # 互動模式 (如果沒有給 COMMAND)
     if len(sys.argv) == 2:
@@ -85,7 +122,7 @@ def main():
                 if cmd_line in ['exit', 'quit']: break
                 
                 # 執行指令 (預設用 root 或是之前指定的 user)
-                command_list = ["/bin/bash", "-c", cmd_line]
+                command_list = ["/bin/bash", "-c", make_bash_cmd(cmd_line)]
                 run_qemu_agent(vm_name, command_list)
                 readline.write_history_file(history_file)
             except EOFError:
@@ -100,10 +137,10 @@ def main():
     if raw_args[0].startswith('@'):
         user = raw_args[0][1:]
         command_str = " ".join(raw_args[1:])
-        command_list = ["/usr/bin/sudo", "-i", "-u", user, "/bin/bash", "-c", command_str]
+        command_list = ["/usr/bin/sudo", "-i", "-u", user, "/bin/bash", "-c", make_bash_cmd(command_str)]
     else:
         command_str = " ".join(raw_args)
-        command_list = ["/bin/bash", "-c", command_str]
+        command_list = ["/bin/bash", "-c", make_bash_cmd(command_str)]
     
     _, code = run_qemu_agent(vm_name, command_list)
     sys.exit(code)

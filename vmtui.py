@@ -751,6 +751,7 @@ def create_windows_vm(stdscr, name, vm_dir, disk_path, iso, net_args):
         "--os-variant=win10",
         "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
         "--channel", "spicevmc",
+        "--channel", "unix,target_type=virtio,name=org.qemu.guest_agent.0",
         "--cpu", "host-passthrough",
         "--boot", "uefi,menu=on",
         "--features", "smm=on",
@@ -810,6 +811,7 @@ runcmd:
   - mount -a
   - systemctl enable serial-getty@ttyS0.service
   - systemctl start serial-getty@ttyS0.service
+  - systemctl enable --now qemu-guest-agent
 
 packages:
   - build-essential
@@ -833,6 +835,7 @@ packages:
   - curl
   - samba
   - sshfs
+  - qemu-guest-agent
 
 power_state:
   mode: reboot
@@ -856,6 +859,7 @@ power_state:
         "--import",
         "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
         "--channel", "spicevmc",
+        "--channel", "unix,target_type=virtio,name=org.qemu.guest_agent.0",
         "--serial", "pty", 
         "--serial", f"file,path={log_path}",
         "--console", "pty,target_type=serial",
@@ -884,6 +888,45 @@ def launch_viewer(vm_name):
         cmd = ["sudo", "-E", "-u", SUDO_USER] + cmd
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def auto_attach_usb(stdscr, vm_name):
+    entry = VM_REGISTRY.get(vm_name)
+    if not isinstance(entry, dict):
+        return
+    auto_usb = entry.get("auto_usb", [])
+    if not auto_usb:
+        return
+    for sig in auto_usb:
+        parts = sig.split(":")
+        if len(parts) != 2:
+            continue
+        vid, pid = parts[0].lower(), parts[1].lower()
+        try:
+            int(vid, 16)
+            int(pid, 16)
+        except ValueError:
+            continue
+        xml_content = (
+            f"<hostdev mode='subsystem' type='usb' managed='yes'>"
+            f"<source><vendor id='0x{vid}'/><product id='0x{pid}'/></source></hostdev>"
+        )
+        xml_path = f"/tmp/vmtui_auto_usb_{vid}_{pid}.xml"
+        try:
+            with open(xml_path, "w", encoding="utf-8") as f:
+                f.write(xml_content)
+        except OSError:
+            continue
+        try:
+            result = subprocess.run(
+                ["virsh", "attach-device", vm_name, xml_path, "--live"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                err = result.stderr.strip()
+                msg_box(stdscr, f"Warning: auto-attach USB {vid}:{pid} failed:\n{err}")
+        except OSError as e:
+            msg_box(stdscr, f"Warning: auto-attach USB {vid}:{pid} error:\n{e}")
+
 def start_vm(stdscr):
     if not CURRENT_VM:
         msg_box(stdscr, "No Active VM selected.")
@@ -896,7 +939,9 @@ def start_vm(stdscr):
         launch_viewer(CURRENT_VM)
         return
     success, err = run_cmd_live(stdscr, ["virsh", "-c", "qemu:///system", "start", CURRENT_VM], title="Starting...")
-    if success: launch_viewer(CURRENT_VM)
+    if success:
+        auto_attach_usb(stdscr, CURRENT_VM)
+        launch_viewer(CURRENT_VM)
     else: msg_box(stdscr, f"Error starting VM:\n{err}")
 
 def resize_vm_disk(stdscr):
@@ -1113,6 +1158,7 @@ def restore_vm_from_disk(stdscr, name, path):
             "--os-variant=win10",
             "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
             "--channel", "spicevmc",
+            "--channel", "unix,target_type=virtio,name=org.qemu.guest_agent.0",
             "--cpu", "host-passthrough",
             "--boot", "uefi,menu=on",
             "--features", "smm=on",
@@ -1135,6 +1181,7 @@ def restore_vm_from_disk(stdscr, name, path):
             "--os-variant=generic",
             "--graphics", "spice,listen=127.0.0.1", "--video", "qxl",
             "--channel", "spicevmc",
+            "--channel", "unix,target_type=virtio,name=org.qemu.guest_agent.0",
             "--console", "pty,target_type=serial",
             f"--filesystem", f"source={HOST_SHARE_DIR},target=host_share,driver.type=virtiofs,accessmode=passthrough",
             "--cpu", "host-passthrough",
@@ -1143,6 +1190,7 @@ def restore_vm_from_disk(stdscr, name, path):
 
     success, err = run_cmd_live(stdscr, cmd, title=f"Restoring {name}...")
     if success:
+        auto_attach_usb(stdscr, name)
         msg_box(stdscr, f"VM '{name}' restored and started!")
     else:
         msg_box(stdscr, f"Restore Failed:\n{err}")
@@ -1301,6 +1349,7 @@ def main(stdscr):
                 elif "shut off" in state:
                     msg_box(stdscr, "Starting VM (Booting/S4 Restore)...")
                     run_cmd(["virsh", "-c", "qemu:///system", "start", CURRENT_VM], check=False)
+                    auto_attach_usb(stdscr, CURRENT_VM)
                 else:
                     msg_box(stdscr, f"VM is currently: {state_raw}\nAttempting normal resume...")
                     run_cmd(["virsh", "-c", "qemu:///system", "resume", CURRENT_VM], check=False)
